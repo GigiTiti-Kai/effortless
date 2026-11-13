@@ -550,10 +550,29 @@ async function followVerdict($: EngineInterface, verdict: Pick, inUse: ModelKey)
   await choose($, { ...verdict, model: inUse, effort, why })
 }
 
+/** Thanks: low within Min and Max. A go-ahead: the session's own effort, so nothing is rewritten. No judge either way. */
+async function pickByRule($: EngineInterface, thanks: boolean, said: string) {
+  const inUse = await sessionModel($)
+  const session = EFFORTS.includes(engineEffort as Effort) ? (engineEffort as Effort) : undefined
+  const effort = thanks ? bounded('low', config.floor, config.ceiling) : session
+  await choose($, effort ? { model: inUse, effort, why: thanks ? 'thanks' : 'a go-ahead: the session effort', by: 'rule' } : null)
+  if (routed) routed = null
+  await countPrompt($, inUse !== 'haiku' ? effort : undefined, 'rule', 0, 0)
+  void proof($, `${thanks ? 'thanks' : 'follow-up'} "${said.slice(0, 50)}": ${effort ?? 'the session effort (not seen yet)'} by rule, no judge`)
+}
+
+/** Messages typed mid-turn that carry work: go-aheads and thanks carry none, so they never send a message to the judge. */
+export function carriesWork(texts: readonly string[]): string[] {
+  return texts.filter(t => !isFollowUp(t))
+}
+
 /** A turn no message started (a message typed mid-turn that runs as its own turn): what was typed decides it now. */
 async function decideCarried($: EngineInterface) {
-  const texts = carried
+  const all = carried
+  const texts = carriesWork(all)
   carried = []
+  // Only go-aheads or thanks were typed: the same rules as for a message that starts a turn.
+  if (!texts.length) return pickByRule($, all.every(isThanks), all.join(' '))
   const inUse = await sessionModel($)
   const named = lastNamed(texts)
   if (named) {
@@ -4138,31 +4157,23 @@ Saved to ${out}.md and .json` }
       void proof($, `typed mid-turn: "${e.text.slice(0, 50)}" waits for the next turn, no judge`)
       return next(e)
     }
-    const earlier = carried
+    const earlier = carriesWork(carried)
     carried = []
     const shown = earlier.length ? withCarried(withAttachments(said, e.attachments), earlier.join('\n')) : withAttachments(said, e.attachments)
     const before = await read($, pick)
     // A message with an image is never a bare follow-up: "fix this" plus a screenshot is new work; nor is one with
-    // messages carried from the last turn, which may have steered it.
+    // messages carried from the last turn that may have steered it (carried go-aheads and thanks were dropped above).
     const bare = wantsEffort && !e.attachments?.length && !slash && !earlier.length
     // Thanks and nothing else: low by rule, within the person's Min and Max. No judge.
     if (bare && isThanks(e.text)) {
-      const inUse = await sessionModel($)
-      await choose($, { model: inUse, effort: bounded('low', config.floor, config.ceiling), why: 'thanks', by: 'rule' })
-      if (routed) routed = null
-      await countPrompt($, inUse !== 'haiku' ? bounded('low', config.floor, config.ceiling) : undefined, 'rule', 0, 0)
-      void proof($, `thanks "${e.text.trim()}": low by rule, no judge`)
+      await pickByRule($, true, e.text.trim())
       $.ui.invalidate('ui.render')
       return next(e)
     }
     // "go", "ok", "はい" between two steps of work: nothing to change, so the session's own effort goes out, with no
     // rewrite and no judge. A level above it is kept only by naming it again.
     if (bare && before?.by !== 'manual' && isFollowUp(e.text) && keepsEffort(e.text, await recentContext($).catch(() => ''))) {
-      const session = EFFORTS.includes(engineEffort as Effort) ? (engineEffort as Effort) : undefined
-      await choose($, session ? { model: await sessionModel($), effort: session, why: 'a go-ahead: the session effort', by: 'rule' } : null)
-      if (routed) routed = null
-      await countPrompt($, session, 'rule', 0, 0)
-      void proof($, `follow-up "${e.text.trim()}": the session effort ${session ?? '(not seen yet)'}, no judge`)
+      await pickByRule($, false, e.text.trim())
       $.ui.invalidate('ui.render')
       return next(e)
     }

@@ -3413,6 +3413,43 @@ describe('a message typed while a turn runs', () => {
     expect(sent.map(s => s.effort)).toEqual(['low', 'max', 'medium'])
   })
 
+  test('go-aheads and thanks typed mid-turn follow the rules: no judge, the session effort or low', async ($, on) => {
+    engine(on)
+    const asked = judgeSaysNow(on, { effort: 'high' })
+    const sent = recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (turnId: string) => {
+      for await (const _ of $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', effort: 'medium', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const done = (turnId: string) => $.turn.complete({ turnId, answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    const typed = (text: string, turnId?: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' }, ...(turnId ? { turnId } : {}) } as never)
+
+    await typed('Use high effort. Run the tests.')
+    await at('t1')
+    // A queued はい runs as its own turn: the session effort.
+    await typed('はい', 't1')
+    await done('t1')
+    await at('t2')
+    await done('t2')
+    // A queued ありがとう: low.
+    await typed('ありがとう', 't2')
+    await done('t2')
+    await at('t3')
+    await done('t3')
+    // A はい typed mid-turn, then はい as the next message: the session effort.
+    await typed('Use high effort. Run them again.')
+    await at('t4')
+    await typed('はい', 't4')
+    await done('t4')
+    await typed('はい')
+    await at('t5')
+
+    expect(asked.length).toBe(0)
+    expect(sent.map(s => s.effort)).toEqual(['high', 'medium', 'low', 'high', 'medium'])
+  })
+
   test('of two levels typed mid-turn, the later one wins', async ($, on) => {
     engine(on)
     const asked = judgeSaysNow(on, { effort: 'high' })
