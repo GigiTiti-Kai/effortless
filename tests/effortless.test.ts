@@ -2800,6 +2800,29 @@ describe('dashboard', () => {
     expect(await cacheLine()).toContain('40 min left')
   })
 
+  test('a routed turn: the log and /effortless debug name the same effort for every request', { options: { modelAuto: 'on' } } as never, async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    judgeSays(on, '{"model":"sonnet","effort":"high","why":"work"}')
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'Explain this implementation', wait: false, origin: { kind: 'composer' } })
+    for (const index of [0, 1]) {
+      for await (const _ of $.turn.step({ turnId: 'r1', index, model: 'claude-fable-5-2', effort: 'low', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const debug = String((await $.command.run({ command: 'effortless', args: 'debug' })).text)
+    const routedLines = (written['/x/proof.log'] ?? '').split('\n').filter(l => / -> claude-sonnet-5-5 at /.test(l))
+    expect(sent.map(s => s.model)).toEqual(['claude-sonnet-5-5', 'claude-sonnet-5-5'])
+    expect(routedLines.length).toBe(2)
+    for (const line of routedLines) expect(line).toContain('at high')
+    expect(debug).toContain('sent claude-sonnet-5-5 at high')
+  })
+
   test('looksLikeRedo: a correction after a cheaper answer, not a thank-you or a new task', () => {
     for (const yes of ["no, that's wrong", 'Nope. still fails on line 3', 'wrong, it is the other file', "that doesn't work", 'still broken', 'try again please', 'funkar inte', 'fel, det ska vara src', 'inte rätt', "it still doesn't compile"])
       expect(looksLikeRedo(yes)).toBe(true)

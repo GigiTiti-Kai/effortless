@@ -4331,7 +4331,9 @@ Saved to ${out}.md and .json` }
       const to = MODELS.find(m => m.key === routed)!.id
       const picked = await read($, pick)
       const effort = e.index === 0 ? (picked?.effort ?? e.effort) : e.effort
-      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${effort}`)
+      // The same effort /effortless debug reports for this request (lastRequest): the turn's, from its first request.
+      // shortcut: what a cheaper model is sent on a later request is not measured; check its transcript to be sure.
+      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${e.index === 0 ? effort : (sentNow ?? effort)}`)
       const result = yield* send({ ...e, model: to, effort })
       if (picked && picked.by !== 'manual' && result.usage) await tally($, picked.effort, result.usage)
       return result
