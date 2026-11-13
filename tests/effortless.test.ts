@@ -3507,6 +3507,37 @@ describe('a message typed while a turn runs', () => {
   })
 })
 
+describe('the line under a reply', () => {
+  test('each reply shows the effort its own turn went out with, also after a later turn at another', async ($, on) => {
+    engine(on)
+    judgeSays(on, '{"model":"opus","effort":"low","why":"small"}')
+    recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const turn = async (turnId: string, text: string) => {
+      await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+      for await (const _ of $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', effort: 'medium', messageCount: 1 })) {
+        // drain
+      }
+      await $.turn.complete({ turnId, answer: 'done', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+    }
+    const line = (turnId: string) => $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { turnId, word: 'Worked', durationMs: 4000 } } as never)
+
+    await turn('t1', 'Use high effort. Reply hi.')
+    const first = await line('t1')
+    expect(await drawn(first)).toContain('✦ High')
+    await turn('t2', 'rename x to count in utils')
+    await first.redraw()
+    expect(await drawn(first)).toContain('✦ High')
+    expect(await drawn(first)).not.toContain('Low')
+    const second = await line('t2')
+    expect(await drawn(second)).toContain('✦ Low')
+    // A turn from before the plugin loaded: its effort is not known, so none is shown rather than today's.
+    const older = await line('t0')
+    expect(await drawn(older)).not.toContain('✦')
+    await Promise.all([first.unmount(), second.unmount(), older.unmount()])
+  })
+})
+
 describe('updates', () => {
   const DESK = { options: { layout: 'default' } } as never
   /** A session with `installed` on disk and `latest` on main; records what the mod runs. */

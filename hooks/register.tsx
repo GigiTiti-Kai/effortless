@@ -1151,6 +1151,9 @@ let lastRequest: { index: number; appModel: string; appEffort: unknown; model: s
 // The effort the running turn's first request went out with. Its later requests run at it too, whatever they carry, so
 // the footer and the logs show this, not the pick. Cleared when the turn ends.
 let sentNow: Effort | undefined
+// The effort each main-chat turn went out with, by turn id (null: the request carried none, as on Haiku). The line
+// under a reply shows its own turn's, not the effort in use now.
+const sentByTurn = new Map<string, Effort | null>()
 // The slash command this mod last typed into the prompt box.
 let lastTyped = ''
 // The toast about pressing Enter is shown once; on every click it is only noise.
@@ -4275,6 +4278,7 @@ Saved to ${out}.md and .json` }
       if (e.agentId === undefined) {
         // A later request goes out at the effort of the turn's first, whatever it carries.
         if (e.index === 0 || !sentNow) sentNow = EFFORTS.includes(request.effort as Effort) ? (request.effort as Effort) : undefined
+        if (e.index === 0) sentByTurn.set(e.turnId, sentNow ?? null)
         lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: sentNow ?? request.effort, at: Date.now() }
         if (e.index === 0 && request.effort !== e.effort) void proof($, `request ${e.index} (${request.model}): effort ${e.effort ?? 'none'} -> ${request.effort ?? 'none'} sent`)
       }
@@ -4560,12 +4564,14 @@ Saved to ${out}.md and .json` }
     if (config.hide.includes('line')) return next(e)
     const { Box, Text } = themedEls($.ui.resolve(e))
     const v = await snap($)
-    const effortNow = effortOf(v, v.modelNow ?? 'sonnet')
+    // The effort this reply's turn went out with. A turn from before the plugin (re)loaded has no record, and the
+    // effort in use now may differ from the one it was sent at, so none is shown for it.
+    const sentThen = sentByTurn.get(e.props.turnId)
     const took = Math.max(1, Math.round(e.props.durationMs / 1000))
     return (
       <Box key="turn-line" flexDirection="row" gap={1}>
         <Text dimColor>{`${e.props.word} ${took < 60 ? `${took}s` : `${Math.floor(took / 60)}m ${took % 60}s`}`}</Text>
-        <Text color={ACCENT}>{`✦ ${effortNow ? EFFORT_LABELS[effortNow] : 'Auto'}`}</Text>
+        {sentThen === undefined ? null : <Text color={ACCENT}>{`✦ ${sentThen ? EFFORT_LABELS[sentThen] : 'Auto'}`}</Text>}
         {v.cacheNow === null ? null : (
           <Text dimColor={cacheColor(v.cacheNow) === undefined} color={cacheColor(v.cacheNow)}>{`· ${v.cacheNow <= 0 ? 'cache cold' : `cache ${cacheLabel(v.cacheNow)}`}`}</Text>
         )}
