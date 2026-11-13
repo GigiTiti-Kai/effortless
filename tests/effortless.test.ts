@@ -1,7 +1,7 @@
 import { describe, expect, mock, test as baseTest } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
+import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
 import { ART_COLUMNS, artFrame, artPixel, MOVING } from '../hooks/art'
 import { isLight, lightHex, lightProps, setLight, setTheme, themedEls, themedSvg, tint, tintHex } from '../hooks/theme'
 import { importsOf, moduleLinks, moduleOf, relPath, withTouch } from '../hooks/agents'
@@ -323,7 +323,7 @@ describe('model in use', () => {
       $.classic.PostModelSwitch({ from_model: from, to_model: to, requested_model: null, source: 'picker', context_tokens: 0 } as never)
 
     await switchTo('claude-opus-5-5', 'claude-haiku-5-5')
-    await $.prompt.submit({ text: 'ok', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: 'rename x to count in utils', wait: false, origin: { kind: 'composer' } })
     const ui = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', ...BAND })
     await ui.redraw()
     expect((await ui.find({ key: 'm-haiku' }))?.text).toContain('Haiku')
@@ -725,15 +725,26 @@ describe('follow-ups', () => {
     expect(asked.length).toBe(2)
   })
 
-  test('"go" after a judged prompt keeps its effort and asks no judge', async ($, on) => {
+  test('"go" after a judged prompt goes out at the session effort: no rewrite, no judge', async ($, on) => {
     engine(on)
     const asked = judgeSays(on, '{"model":"opus","effort":"high","why":"hard"}')
     const sent = recordSteps(on)
     await $.prompt.submit({ text: 'granska hela relayn', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
     await $.prompt.submit({ text: 'go', wait: false, origin: { kind: 'composer' } })
     await step($, 'medium')
     expect(asked.length).toBe(1)
-    expect(sent[0].effort).toBe('high')
+    expect(sent.map(s => s.effort)).toEqual(['high', 'medium'])
+  })
+
+  test('a go-ahead as the first message asks no judge', async ($, on) => {
+    engine(on)
+    const asked = judgeSays(on, '{"model":"opus","effort":"high","why":"hard"}')
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'はい', wait: false, origin: { kind: 'composer' } })
+    await step($, 'low')
+    expect(asked.length).toBe(0)
+    expect(sent.map(s => s.effort)).toEqual(['low'])
   })
 })
 
@@ -3316,6 +3327,12 @@ describe('handoff look', () => {
 })
 
 describe('a message typed while a turn runs', () => {
+  test('lastNamed: the last level typed wins', () => {
+    expect(lastNamed(['max effort please', 'actually use low effort'])).toBe('low')
+    expect(lastNamed(['max effort please', 'and add a test'])).toBe('max')
+    expect(lastNamed([])).toBeUndefined()
+  })
+
   /** The judge answers with whatever `says.effort` holds at the time. */
   function judgeSaysNow(on: On, says: { effort: string }) {
     const asked: string[] = []
@@ -3372,6 +3389,46 @@ describe('a message typed while a turn runs', () => {
     expect(asked.length).toBe(1)
     // The second request goes out as the app sends it: the first one's low carries it.
     expect(sent.map(s => s.effort)).toEqual(['low', 'high', 'max'])
+  })
+
+  test('a message typed mid-turn that runs as its own turn is decided at that turn\'s first request, and only there', async ($, on) => {
+    engine(on)
+    const asked = judgeSaysNow(on, { effort: 'medium' })
+    const sent = recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+
+    await $.prompt.submit({ text: 'Use low effort. Reply ok.', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't1', 0)
+    await $.prompt.submit({ text: 'Use max effort. Reply queued.', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    // The queued message runs as t2: no prompt.submit starts it.
+    await stepOf($, 't2', 0)
+    await $.turn.complete({ turnId: 't2', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    // It was used up there: the next message is judged on its own.
+    await $.prompt.submit({ text: 'what does the regex mean', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't3', 0)
+
+    expect(asked.length).toBe(1)
+    expect(asked[0]).not.toContain('Reply queued')
+    expect(sent.map(s => s.effort)).toEqual(['low', 'max', 'medium'])
+  })
+
+  test('of two levels typed mid-turn, the later one wins', async ($, on) => {
+    engine(on)
+    const asked = judgeSaysNow(on, { effort: 'high' })
+    const sent = recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+
+    await $.prompt.submit({ text: 'Use high effort. Run the tests.', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't1', 0)
+    await $.prompt.submit({ text: 'Use max effort. Do a thorough pass.', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.prompt.submit({ text: 'Actually use low effort. Just the quick check.', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    await $.prompt.submit({ text: '続けて', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't2', 0)
+
+    expect(asked.length).toBe(0)
+    expect(sent.map(s => s.effort)).toEqual(['high', 'low'])
   })
 
   test("only a turn's first request is rewritten, and only when the pick differs from the app's effort", async ($, on) => {

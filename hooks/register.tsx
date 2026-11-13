@@ -521,12 +521,52 @@ export function withCarried(text: string, carried: string): string {
 [Typed earlier, while the last task was still running, and not judged then: ${carried}]`
 }
 // Messages typed while a turn ran. A running turn keeps the effort its first request went out with (a later rewrite is
-// never sent), so they are judged with the next message, at the start of the next turn (see prompt.submit).
-let carried = ''
+// never sent), so they are decided at the start of the next turn: with the next message (prompt.submit), or, when one
+// of them runs as a turn of its own and no message starts it, at that turn's first request (turn.step).
+let carried: string[] = []
+// A message started the coming turn (prompt.submit), so its first request needs no decision of its own.
+let freshTurn = false
+
+/** The level named last in messages typed during a turn: a later correction ("actually low effort") wins. */
+export function lastNamed(texts: readonly string[]): Effort | undefined {
+  for (const t of [...texts].reverse()) {
+    const named = namedEffort(t)
+    if (named) return named
+  }
+  return undefined
+}
 
 /** A short follow-up that keeps the current effort: "go" between two steps, not an answer to a question. */
 export function keepsEffort(message: string, context: string): boolean {
   return isFollowUp(message) && !endsOnQuestion(context)
+}
+
+/** The pick a verdict makes, within the person's slider, Min, Max and save mode. */
+async function followVerdict($: EngineInterface, verdict: Pick, inUse: ModelKey) {
+  const saving = (await read($, saveUntil)) !== null
+  const leaned = bounded(tipped(verdict.effort, verdict.sure, config.bias), config.floor, config.ceiling)
+  const effort = capped(leaned, saving)
+  const why = effort !== leaned ? 'save mode' : leaned !== verdict.effort ? 'your settings' : verdict.why
+  await choose($, { ...verdict, model: inUse, effort, why })
+}
+
+/** A turn no message started (a message typed mid-turn that runs as its own turn): what was typed decides it now. */
+async function decideCarried($: EngineInterface) {
+  const texts = carried
+  carried = []
+  const inUse = await sessionModel($)
+  const named = lastNamed(texts)
+  if (named) {
+    await choose($, { model: inUse, effort: named, why: 'you asked for it', by: 'named' })
+    await countPrompt($, inUse !== 'haiku' ? named : undefined, 'named', 0, 0)
+    void proof($, `turn started by a message typed mid-turn: named level ${named}, no judge`)
+    return
+  }
+  const startedAt = Date.now()
+  const { verdict, tokens } = await judge($, texts.join('\n'), { model: inUse, effort: (await read($, pick))?.effort ?? 'medium', why: '', by: 'manual' })
+  await countPrompt($, inUse !== 'haiku' ? verdict?.effort : undefined, verdict?.by, Date.now() - startedAt, tokens)
+  if (verdict) await followVerdict($, verdict, inUse)
+  void proof($, `turn started by a message typed mid-turn: ${verdict ? `judged by ${verdict.by}: ${verdict.effort}` : 'no verdict'}`)
 }
 
 /** The TypeSafe key in a ~/.config/jev/.env file's text, the same file the jev-* skills read. */
@@ -4065,7 +4105,10 @@ Saved to ${out}.md and .json` }
 
   on('prompt.submit', async ($, e, next) => {
     await setTurnBusy($, true)
-    if (e.turnId === undefined) sentNow = undefined
+    if (e.turnId === undefined) {
+      sentNow = undefined
+      freshTurn = true
+    }
     turnCost = 0
     // A landed handoff's card goes once the next message is sent.
     const card = await read($, handoffCard)
@@ -4091,17 +4134,17 @@ Saved to ${out}.md and .json` }
     // Typed while a turn ran (e.turnId): that turn's effort can no longer change, so no judge is asked now. The message
     // is carried to the next one and judged with it, at the start of the next turn.
     if (e.turnId !== undefined) {
-      carried = carried ? `${carried}\n${withAttachments(said, e.attachments)}` : withAttachments(said, e.attachments)
+      carried.push(withAttachments(said, e.attachments))
       void proof($, `typed mid-turn: "${e.text.slice(0, 50)}" waits for the next turn, no judge`)
       return next(e)
     }
     const earlier = carried
-    carried = ''
-    const shown = earlier ? withCarried(withAttachments(said, e.attachments), earlier) : withAttachments(said, e.attachments)
+    carried = []
+    const shown = earlier.length ? withCarried(withAttachments(said, e.attachments), earlier.join('\n')) : withAttachments(said, e.attachments)
     const before = await read($, pick)
     // A message with an image is never a bare follow-up: "fix this" plus a screenshot is new work; nor is one with
     // messages carried from the last turn, which may have steered it.
-    const bare = wantsEffort && !e.attachments?.length && !slash && !earlier
+    const bare = wantsEffort && !e.attachments?.length && !slash && !earlier.length
     // Thanks and nothing else: low by rule, within the person's Min and Max. No judge.
     if (bare && isThanks(e.text)) {
       const inUse = await sessionModel($)
@@ -4112,14 +4155,19 @@ Saved to ${out}.md and .json` }
       $.ui.invalidate('ui.render')
       return next(e)
     }
-    // "go", "ok", "はい" between two steps of work keep the effort Auto already chose; no judge is asked.
-    if (bare && before && before.by !== 'manual' && isFollowUp(e.text) && keepsEffort(e.text, await recentContext($).catch(() => ''))) {
-      await countPrompt($, before.effort, undefined, 0, 0)
-      void proof($, `follow-up "${e.text.trim()}": keeping ${before.effort}`)
+    // "go", "ok", "はい" between two steps of work: nothing to change, so the session's own effort goes out, with no
+    // rewrite and no judge. A level above it is kept only by naming it again.
+    if (bare && before?.by !== 'manual' && isFollowUp(e.text) && keepsEffort(e.text, await recentContext($).catch(() => ''))) {
+      const session = EFFORTS.includes(engineEffort as Effort) ? (engineEffort as Effort) : undefined
+      await choose($, session ? { model: await sessionModel($), effort: session, why: 'a go-ahead: the session effort', by: 'rule' } : null)
+      if (routed) routed = null
+      await countPrompt($, session, 'rule', 0, 0)
+      void proof($, `follow-up "${e.text.trim()}": the session effort ${session ?? '(not seen yet)'}, no judge`)
+      $.ui.invalidate('ui.render')
       return next(e)
     }
     // "max effort", "effort: low": the person said the level, so it runs, past Min, Max and save mode, and no judge is asked.
-    const named = wantsEffort && !slash ? namedEffort(e.text) ?? (earlier ? namedEffort(earlier) : undefined) : undefined
+    const named = wantsEffort && !slash ? namedEffort(e.text) ?? lastNamed(earlier) : undefined
     if (named) {
       const inUse = await sessionModel($)
       await choose($, { model: inUse, effort: named, why: 'you asked for it', by: 'named' })
@@ -4159,13 +4207,7 @@ Saved to ${out}.md and .json` }
       if (verdict) {
         // Effort follows the verdict at once, when Auto is on for effort. The model stays: switching it
         // reloads the context, so with Auto on for model it is only suggested.
-        if (wantsEffort) {
-          const saving = (await read($, saveUntil)) !== null
-          const leaned = bounded(tipped(verdict.effort, verdict.sure, config.bias), config.floor, config.ceiling)
-          const effort = capped(leaned, saving)
-          const why = effort !== leaned ? 'save mode' : leaned !== verdict.effort ? 'your settings' : verdict.why
-          await choose($, { ...verdict, model: inUse, effort, why })
-        }
+        if (wantsEffort) await followVerdict($, verdict, inUse)
         // A prompt the judge calls simple runs on a cheaper model.
         {
           let to = wantsEffort && config.modelAuto === 'on' ? routeTo(verdict.model, inUse) : null
@@ -4256,11 +4298,19 @@ Saved to ${out}.md and .json` }
         return yield* send(e)
       }
     }
-    // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort.
+    if (e.agentId === undefined && e.index === 0) {
+      if (carried.length && !freshTurn) {
+        if ((await read($, isAuto)) && cacheSafe(e.model)) await decideCarried($)
+        else carried = []
+      }
+      freshTurn = false
+    }
+    // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort (on the first
+    // request only, like any effort change: the later ones run at it).
     if (e.agentId === undefined && routed && (await read($, isAuto))) {
       const to = MODELS.find(m => m.key === routed)!.id
       const picked = await read($, pick)
-      const effort = picked?.effort ?? e.effort
+      const effort = e.index === 0 ? (picked?.effort ?? e.effort) : e.effort
       void proof($, `request ${e.index}: ${e.model} -> ${to} at ${effort}`)
       const result = yield* send({ ...e, model: to, effort })
       if (picked && picked.by !== 'manual' && result.usage) await tally($, picked.effort, result.usage)
