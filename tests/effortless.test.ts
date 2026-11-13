@@ -3518,9 +3518,11 @@ describe('the line under a reply', () => {
       for await (const _ of $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', effort: 'medium', messageCount: 1 })) {
         // drain
       }
-      await $.turn.complete({ turnId, answer: 'done', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+      await $.turn.complete({ turnId, answer: 'done', durationMs: took[turnId], isAborted: false, reason: 'answer' } as never)
     }
-    const line = (turnId: string) => $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { turnId, word: 'Worked', durationMs: 4000 } } as never)
+    // The app hands the line the turn's duration, the same number turn.complete carries, and no turn id.
+    const took: Record<string, number> = { t0: 999, t1: 2334, t2: 11914 }
+    const line = (turnId: string) => $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { word: 'Worked', durationMs: took[turnId], isExpanded: false } } as never)
 
     await turn('t1', 'Use high effort. Reply hi.')
     const first = await line('t1')

@@ -1151,9 +1151,13 @@ let lastRequest: { index: number; appModel: string; appEffort: unknown; model: s
 // The effort the running turn's first request went out with. Its later requests run at it too, whatever they carry, so
 // the footer and the logs show this, not the pick. Cleared when the turn ends.
 let sentNow: Effort | undefined
-// The effort each main-chat turn went out with, by turn id (null: the request carried none, as on Haiku). The line
-// under a reply shows its own turn's, not the effort in use now.
+// The effort each main-chat turn went out with (null: its request carried none, as on Haiku), by turn id from its first
+// request, and by its duration once it ends: the line under a reply (TurnDuration) gets the turn's duration and no turn
+// id (2.1.323, measured), and shows its own turn's effort, not the one in use now.
+// shortcut: two turns that took the same millisecond share an entry, the later wins; key by message once the app
+// passes one to TurnDuration.
 const sentByTurn = new Map<string, Effort | null>()
+const sentByDuration = new Map<number, Effort | null>()
 // The slash command this mod last typed into the prompt box.
 let lastTyped = ''
 // The toast about pressing Enter is shown once; on every click it is only noise.
@@ -3960,6 +3964,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId) await agentEnded($, e.agentId, e.reason)
     if (!e.agentId) await setTurnBusy($, false)
+    if (!e.agentId && typeof e.durationMs === 'number' && sentByTurn.has(e.turnId)) sentByDuration.set(e.durationMs, sentByTurn.get(e.turnId) ?? null)
     if (!e.agentId) sentNow = undefined
     // The newest reply's text: its last block carries the warning card (see AssistantMessage).
     if (!e.agentId && e.reason === 'answer') await update($, lastAnswer, () => e.answer.trim())
@@ -4566,7 +4571,8 @@ Saved to ${out}.md and .json` }
     const v = await snap($)
     // The effort this reply's turn went out with. A turn from before the plugin (re)loaded has no record, and the
     // effort in use now may differ from the one it was sent at, so none is shown for it.
-    const sentThen = sentByTurn.get(e.props.turnId)
+    const id = (e.props as { turnId?: string }).turnId
+    const sentThen = id !== undefined && sentByTurn.has(id) ? sentByTurn.get(id) : sentByDuration.get(e.props.durationMs)
     const took = Math.max(1, Math.round(e.props.durationMs / 1000))
     return (
       <Box key="turn-line" flexDirection="row" gap={1}>
