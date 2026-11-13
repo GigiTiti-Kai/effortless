@@ -133,7 +133,7 @@ Haiku also picks the effort, unless you add Jev, TypeSafe's faster judge (about 
 
 A key set with `/plugin configure` is kept in Claude Code's secure storage. A key pasted in the setup guide or the Judge card is written in plain text to `~/.config/jev/.env` (the file the jev skills read), never to a file of this repo. If Jev fails or takes longer than 3 seconds, Haiku judges that prompt and effortless tells you why once per session (out of credits, key rejected, no answer).
 
-Short follow-ups such as "go", "ok" or "yes" keep the effort already picked and ask no judge.
+Short go-aheads such as "go", "ok", "はい" or "続けて" ask no judge and run at the session's own effort (set with `/effort` or `--effort`), so nothing is rewritten: set the session to the level you usually work at. Name a level ("high effort") to keep a higher one. Thanks alone ("ありがとう", "thanks") runs at low.
 
 ## Keys and trust
 
