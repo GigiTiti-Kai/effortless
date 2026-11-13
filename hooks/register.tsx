@@ -1151,7 +1151,8 @@ let lastRequest: { index: number; appModel: string; appEffort: unknown; model: s
 // The effort the running turn's requests go out at: the first one's, which its later requests keep whatever they carry,
 // until a message is typed mid-turn. Then the app goes back to its own effort (measured in the 2.1.323 terminal: the next
 // request went out at the session's, not the turn's), and a request goes out at what it carries. The footer and the
-// logs show this, not the pick. Cleared when the turn ends.
+// logs show this, not the pick. It stays after the turn ends, and is cleared by the next message or by a new pick made
+// between turns (choose), which the footer then shows.
 // shortcut: in a stream-json run the turn's effort was seen to carry on past a typed message too; this then shows the
 // session's. Read the transcript's output_config.effort to be sure.
 let sentNow: Effort | undefined
@@ -2229,6 +2230,9 @@ async function toggleAutoEffort($: EngineInterface) {
 
 async function choose($: EngineInterface, next: Pick | null) {
   pickCarried = false
+  // A pick made between turns (a click, a model switch) is what the footer shows next; during a turn it stays on the
+  // effort that turn went out at.
+  if (!turnBusy()) sentNow = undefined
   const before = await read($, pick)
   await Promise.all([update($, pick, () => next), $.store.set('pick', next)])
   // A change Auto made is shown as "Low → High" for a moment, so the switch is seen.
@@ -2347,7 +2351,7 @@ function hoverTips(v: Snap): { effort: string; cache: string } {
 /** The effort to show: yours or the judge's, else what the app itself runs with; none on Haiku. */
 function effortOf(v: Snap, inUse: ModelKey): Effort | undefined {
   if (inUse === 'haiku') return undefined
-  // While a turn runs, the effort its requests went out with.
+  // The effort the last request went out at, from the turn's start until the next message or a pick between turns.
   if (sentNow) return sentNow
   if (v.current) return v.current.effort
   return EFFORTS.includes(v.shownByApp as Effort) ? (v.shownByApp as Effort) : undefined
@@ -3976,10 +3980,8 @@ export const register: Register = (on, options) => {
     if (e.agentId) await agentEnded($, e.agentId, e.reason)
     if (!e.agentId) await setTurnBusy($, false)
     if (!e.agentId && typeof e.durationMs === 'number' && sentByTurn.has(e.turnId)) sentByDuration.set(e.durationMs, sentByTurn.get(e.turnId) ?? null)
-    if (!e.agentId) {
-      sentNow = undefined
-      typedThisTurn = false
-    }
+    // sentNow stays: until the next message, the footer and the band show the effort the turn last went out at.
+    if (!e.agentId) typedThisTurn = false
     // The newest reply's text: its last block carries the warning card (see AssistantMessage).
     if (!e.agentId && e.reason === 'answer') await update($, lastAnswer, () => e.answer.trim())
     if (!e.agentId && turnCost > 0) await update($, lastTurn, () => ({ cost: turnCost, ms: e.durationMs ?? 0 }))

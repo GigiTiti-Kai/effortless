@@ -3449,10 +3449,51 @@ describe('a message typed while a turn runs', () => {
     expect(log).toContain('response 1 at high')
     expect(log).toContain('request 2: a message was typed mid-turn, so the app sends its own low')
     expect(log).toContain('response 2 at low')
+    const footer = await $.ui.mount(FOOTER)
+    const level = async () => (await footer.findAll({ type: 'Text' })).map(t => t.text.trim()).find(t => /^(Low|Medium|High|Max)$/.test(t))
+    expect(await level()).toBe('Low')
     await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 4321, isAborted: false, reason: 'answer' } as never)
     const line = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { word: 'Worked', durationMs: 4321, isExpanded: false } } as never)
     expect(await drawn(line)).toContain('✦ Low')
-    await line.unmount()
+    // Once the turn is over the footer still shows what went out last, not the turn's pick (high).
+    await footer.redraw()
+    expect(await level()).toBe('Low')
+    await Promise.all([line.unmount(), footer.unmount()])
+  })
+
+  test('the terminal rows show the last effort sent after the turn ends, and a pick made between turns once made', async ($, on) => {
+    engine(on, {}, 'claude-fable-5-2')
+    mock.clock(on)
+    judgeSaysNow(on, { effort: 'low' })
+    // The click types /effort into an empty prompt box.
+    on('prompt.read', () => ({ value: { text: '', cursor: 0 } }) as never)
+    on('prompt.fill', () => ({ isFilled: true }) as never)
+    recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (index: number) => {
+      for await (const _ of $.turn.step({ turnId: 't1', index, model: 'claude-fable-5-2', effort: 'low', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const rows = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', ...BAND } as never)
+    const lit = async () => {
+      await rows.redraw()
+      return (await rows.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('e-') && b.props.variant === 'primary')?.key
+    }
+
+    await $.prompt.submit({ text: 'Use high effort. Run the tests.', wait: false, origin: { kind: 'composer' } })
+    await at(0)
+    expect(await lit()).toBe('e-high')
+    await $.prompt.submit({ text: 'thanks', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await at(1)
+    expect(await lit()).toBe('e-low')
+    await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 1234, isAborted: false, reason: 'answer' } as never)
+    // The turn's pick was high; low is what went out last.
+    expect(await lit()).toBe('e-low')
+    // A pick between turns is what the rows show next.
+    await rows.press({ key: 'e-max' })
+    expect(await lit()).toBe('e-max')
+    await rows.unmount()
   })
 
   test('a message typed mid-turn that runs as its own turn is decided at that turn\'s first request, and only there', async ($, on) => {
