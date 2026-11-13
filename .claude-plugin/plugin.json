@@ -7,7 +7,7 @@
     "judge": {
       "type": "string",
       "title": "Judge",
-      "description": "Haiku (your own Claude login, no key) always judges handoffs and, unless Jev answers, the effort. auto: Jev as well when a TypeSafe key is set. haiku: Haiku only. jev: Jev as well, and its key may also come from ~/.config/jev/.env.",
+      "description": "Haiku (your own Claude login, no key) judges the effort unless Jev answers. haiku (default): Haiku only. auto: Jev as well when a TypeSafe key is set. jev: Jev as well, and its key may also come from ~/.config/jev/.env.",
       "default": "haiku",
       "options": [
         "auto",
