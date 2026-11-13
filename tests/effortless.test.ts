@@ -1,7 +1,7 @@
 import { describe, expect, mock, test as baseTest } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
+import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
 import { ART_COLUMNS, artFrame, artPixel, MOVING } from '../hooks/art'
 import { isLight, lightHex, lightProps, setLight, setTheme, themedEls, themedSvg, tint, tintHex } from '../hooks/theme'
 import { importsOf, moduleLinks, moduleOf, relPath, withTouch } from '../hooks/agents'
@@ -226,7 +226,7 @@ describe('auto', () => {
     expect(sent[0]).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
   })
 
-  test('Jev on TypeSafe decides when TYPESAFE_API_KEY is set, with typed questions, and Haiku is not asked', async ($, on) => {
+  test('Jev on TypeSafe decides when TYPESAFE_API_KEY is set, with typed questions, and Haiku is not asked', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' })
     mock.clock(on)
     const asked = judgeSays(on, '{"model":"haiku","effort":"low","why":"x"}')
@@ -323,7 +323,7 @@ describe('model in use', () => {
       $.classic.PostModelSwitch({ from_model: from, to_model: to, requested_model: null, source: 'picker', context_tokens: 0 } as never)
 
     await switchTo('claude-opus-5-5', 'claude-haiku-5-5')
-    await $.prompt.submit({ text: 'ok', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: 'rename x to count in utils', wait: false, origin: { kind: 'composer' } })
     const ui = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', ...BAND })
     await ui.redraw()
     expect((await ui.find({ key: 'm-haiku' }))?.text).toContain('Haiku')
@@ -666,6 +666,7 @@ describe('helpers', () => {
     expect(cacheSafe('claude-opus-5-5')).toBe(true)
     expect(cacheSafe('claude-sonnet-5-5[1m]')).toBe(true)
     expect(cacheSafe('claude-fable-5-1')).toBe(false)
+    expect(cacheSafe('claude-fable-5-2')).toBe(true)
     expect(cacheSafe('claude-opus-4-8')).toBe(false)
     expect(cacheSafe('claude-opus-5')).toBe(false)
   })
@@ -689,19 +690,61 @@ describe('helpers', () => {
 
 describe('follow-ups', () => {
   test('isFollowUp: short go-aheads yes, real requests no', () => {
-    for (const t of ['go', 'ok', ' yes ', 'ok go', 'continue']) expect(isFollowUp(t)).toBe(true)
+    for (const t of ['go', 'ok', ' yes ', 'ok go', 'continue', 'OK!']) expect(isFollowUp(t)).toBe(true)
     for (const t of ['', 'rename x to count in utils', 'go through my whole drive']) expect(isFollowUp(t)).toBe(false)
   })
 
-  test('"go" after a judged prompt keeps its effort and asks no judge', async ($, on) => {
+  test('isFollowUp in Japanese goes by the word list, not by length', () => {
+    for (const t of ['はい', 'うん', '続けて', 'お願いします', 'はいお願いします', 'うん、続けて。', 'ありがとう', '続けてください', '進めてください', '了解です', 'わかりました', 'OKです']) expect(isFollowUp(t)).toBe(true)
+    // Short requests: 12 characters or fewer, and still work for the judge.
+    for (const t of ['テスト直して', 'git status見せて', '型注釈を付けて', 'はい、でもテストも']) expect(isFollowUp(t)).toBe(false)
+  })
+
+  test('isThanks: thanks and nothing else', () => {
+    for (const t of ['ありがとう', 'ありがとう、助かった', 'ありがとうございます！', 'thanks!', 'Thank you', '助かった笑']) expect(isThanks(t)).toBe(true)
+    for (const t of ['ok', 'はい', 'ありがとう、次はテストも', 'thanks, now add a test']) expect(isThanks(t)).toBe(false)
+  })
+
+  test('thanks is low by rule, past the effort before it, and asks no judge', async ($, on) => {
+    engine(on)
+    const asked = judgeSays(on, '{"model":"opus","effort":"xhigh","why":"hard"}')
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'granska hela relayn', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
+    await $.prompt.submit({ text: 'ありがとう、助かった', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
+    expect(asked.length).toBe(1)
+    expect(sent.map(s => s.effort)).toEqual(['xhigh', 'low'])
+  })
+
+  test('a short Japanese request goes to the judge', async ($, on) => {
+    engine(on)
+    const asked = judgeSays(on, '{"model":"opus","effort":"high","why":"x"}')
+    await $.prompt.submit({ text: 'granska hela relayn', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: 'テスト直して', wait: false, origin: { kind: 'composer' } })
+    expect(asked.length).toBe(2)
+  })
+
+  test('"go" after a judged prompt goes out at the session effort: no rewrite, no judge', async ($, on) => {
     engine(on)
     const asked = judgeSays(on, '{"model":"opus","effort":"high","why":"hard"}')
     const sent = recordSteps(on)
     await $.prompt.submit({ text: 'granska hela relayn', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
     await $.prompt.submit({ text: 'go', wait: false, origin: { kind: 'composer' } })
     await step($, 'medium')
     expect(asked.length).toBe(1)
-    expect(sent[0].effort).toBe('high')
+    expect(sent.map(s => s.effort)).toEqual(['high', 'medium'])
+  })
+
+  test('a go-ahead as the first message asks no judge', async ($, on) => {
+    engine(on)
+    const asked = judgeSays(on, '{"model":"opus","effort":"high","why":"hard"}')
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'はい', wait: false, origin: { kind: 'composer' } })
+    await step($, 'low')
+    expect(asked.length).toBe(0)
+    expect(sent.map(s => s.effort)).toEqual(['low'])
   })
 })
 
@@ -1132,14 +1175,15 @@ describe('judge choice (plugin settings)', () => {
   const chat = (content: string) =>
     JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 300, completion_tokens: 20 } })
 
-  test('readConfig: an unknown or empty judge is auto, values are trimmed', () => {
-    expect(readConfig(undefined).judge).toBe('auto')
-    expect(readConfig({ judge: 'gpt' }).judge).toBe('auto')
-    // The Custom judge is gone: a saved 'custom' reads as auto.
-    expect(readConfig({ judge: 'custom' }).judge).toBe('auto')
+  test('readConfig: an unknown or empty judge is haiku, values are trimmed', () => {
+    expect(readConfig(undefined).judge).toBe('haiku')
+    expect(readConfig({ judge: 'gpt' }).judge).toBe('haiku')
+    // The Custom judge is gone: a saved 'custom' reads as haiku.
+    expect(readConfig({ judge: 'custom' }).judge).toBe('haiku')
     expect(readConfig({ judge: ' jev ' }).judge).toBe('jev')
+    expect(readConfig({ judge: 'auto' }).judge).toBe('auto')
     expect(readConfig({})).toEqual({
-      judge: 'auto',
+      judge: 'haiku',
       typesafeKey: '',
       handoffSkill: '',
       handoffAfter: 'continue',
@@ -1149,8 +1193,8 @@ describe('judge choice (plugin settings)', () => {
       hide: ['reason'],
       swampAt: 70,
       layout: 'default',
-      compactWith: 'haiku',
-      handoffButton: 'advised',
+      compactWith: 'session',
+      handoffButton: 'always',
       modelAuto: 'off',
       helpers: 'off',
       theme: 'violet',
@@ -1244,7 +1288,7 @@ describe('model-aware effort', () => {
     expect(seen[0].system).toContain('Opus at medium does about what Sonnet does at high')
   })
 
-  test('Jev gets the model in use and the same rule', async ($, on) => {
+  test('Jev gets the model in use and the same rule', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' }, 'claude-opus-5-5')
     mock.clock(on)
     const bodies: Record<string, any>[] = []
@@ -1476,7 +1520,7 @@ describe('judge failures are said', () => {
     expect(judgeFailure('Jev', 'timeout')).toContain('did not answer')
   })
 
-  test('Jev out of credits: the person is told once, and Haiku judges', async ($, on) => {
+  test('Jev out of credits: the person is told once, and Haiku judges', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' })
     mock.clock(on)
     const asked = judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
@@ -1620,7 +1664,7 @@ describe('compaction by Haiku', () => {
     expect(text).toContain('[3000 more characters]')
   })
 
-  test('Haiku 5.5 writes the summary, with the note typed after /compact; Claude Code does not compact', async ($, on) => {
+  test('Haiku 5.5 writes the summary, with the note typed after /compact; Claude Code does not compact', { options: { compactWith: 'haiku' } } as never, async ($, on) => {
     engine(on, {}, 'claude-opus-5-5', said as never)
     const ran = core(on)
     const asked: { model: string; prompt: string }[] = []
@@ -1635,7 +1679,7 @@ describe('compaction by Haiku', () => {
     expect(out.messages?.[0].text).toContain('rename userId across the app')
   })
 
-  test('when Haiku fails, Claude Code compacts as usual and a toast says why', async ($, on) => {
+  test('when Haiku fails, Claude Code compacts as usual and a toast says why', { options: { compactWith: 'haiku' } } as never, async ($, on) => {
     engine(on)
     const ran = core(on)
     const toasts: string[] = []
@@ -2395,7 +2439,7 @@ describe('settings panel', () => {
     const band = await $.ui.mount(DESK_BAND)
     await band.press({ key: 'dash-settings' })
     await band.press({ key: 'settings-card-judge' })
-    await band.select({ key: 'settings-judge-pick', value: 'jev' })
+    await band.select({ key: 'settings-judge-pick', value: 'auto' })
     await band.press({ key: 'settings-judge-test' })
     const result = async () => (await band.findAll({ type: 'Text' })).map(t => t.text).find(t => /^[✓✗]/.test(t))
     expect(await result()).toContain('✓ Jev answered: low in')
@@ -2756,6 +2800,29 @@ describe('dashboard', () => {
     expect(await cacheLine()).toContain('40 min left')
   })
 
+  test('a routed turn: the log and /effortless debug name the same effort for every request', { options: { modelAuto: 'on' } } as never, async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    judgeSays(on, '{"model":"sonnet","effort":"high","why":"work"}')
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'Explain this implementation', wait: false, origin: { kind: 'composer' } })
+    for (const index of [0, 1]) {
+      for await (const _ of $.turn.step({ turnId: 'r1', index, model: 'claude-fable-5-2', effort: 'low', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const debug = String((await $.command.run({ command: 'effortless', args: 'debug' })).text)
+    const routedLines = (written['/x/proof.log'] ?? '').split('\n').filter(l => / -> claude-sonnet-5-5 at /.test(l))
+    expect(sent.map(s => s.model)).toEqual(['claude-sonnet-5-5', 'claude-sonnet-5-5'])
+    expect(routedLines.length).toBe(2)
+    for (const line of routedLines) expect(line).toContain('at high')
+    expect(debug).toContain('sent claude-sonnet-5-5 at high')
+  })
+
   test('looksLikeRedo: a correction after a cheaper answer, not a thank-you or a new task', () => {
     for (const yes of ["no, that's wrong", 'Nope. still fails on line 3', 'wrong, it is the other file', "that doesn't work", 'still broken', 'try again please', 'funkar inte', 'fel, det ska vara src', 'inte rätt', "it still doesn't compile"])
       expect(looksLikeRedo(yes)).toBe(true)
@@ -3092,12 +3159,13 @@ describe('dashboard', () => {
   })
 
   test('readConfig keeps handoffButton to advised or always', () => {
-    expect(readConfig({}).handoffButton).toBe('advised')
-    expect(readConfig({ handoffButton: 'always' }).handoffButton).toBe('always')
-    expect(readConfig({ handoffButton: 'sometimes' }).handoffButton).toBe('advised')
+    // always by default: the advised button asks Haiku every few messages.
+    expect(readConfig({}).handoffButton).toBe('always')
+    expect(readConfig({ handoffButton: 'advised' }).handoffButton).toBe('advised')
+    expect(readConfig({ handoffButton: 'sometimes' }).handoffButton).toBe('always')
   })
 
-  test('one button: Compact until the Haiku check says a handoff would suit; then Handoff, lit, with the reason', DASH, async ($, on) => {
+  test('one button: Compact until the Haiku check says a handoff would suit; then Handoff, lit, with the reason', { options: { layout: 'default', handoffButton: 'advised' } } as never, async ($, on) => {
     engine(on)
     recordSteps(on)
     const mocked = mock.clock(on)
@@ -3282,6 +3350,12 @@ describe('handoff look', () => {
 })
 
 describe('a message typed while a turn runs', () => {
+  test('lastNamed: the last level typed wins', () => {
+    expect(lastNamed(['max effort please', 'actually use low effort'])).toBe('low')
+    expect(lastNamed(['max effort please', 'and add a test'])).toBe('max')
+    expect(lastNamed([])).toBeUndefined()
+  })
+
   /** The judge answers with whatever `says.effort` holds at the time. */
   function judgeSaysNow(on: On, says: { effort: string }) {
     const asked: string[] = []
@@ -3298,7 +3372,7 @@ describe('a message typed while a turn runs', () => {
     }
   }
 
-  test('a lower verdict never lowers the running turn; it takes the next one', async ($, on) => {
+  test('no judge mid-turn: the message is judged with the next one, at the start of the next turn', async ($, on) => {
     engine(on)
     const says = { effort: 'high' }
     const asked = judgeSaysNow(on, says)
@@ -3310,29 +3384,214 @@ describe('a message typed while a turn runs', () => {
     await stepOf($, 't1', 0)
     says.effort = 'low'
     await $.prompt.submit({ text: 'also rename the helper you made', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    expect(asked.length).toBe(1)
     await stepOf($, 't1', 1)
     await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    // "ok" would keep the effort by rule, but a carried message goes to the judge with it.
+    await $.prompt.submit({ text: 'ok', wait: false, origin: { kind: 'composer' } })
     await stepOf($, 't2', 0)
 
     expect(asked.length).toBe(2)
-    // The judge is told the message came in while the task ran.
-    expect(asked[1]).toContain('still working')
+    expect(asked[1]).toContain('also rename the helper you made')
+    expect(asked[1]).toContain('Typed earlier')
     expect(sent.map(s => s.effort)).toEqual(['high', 'high', 'low'])
   })
 
-  test('a higher verdict raises the running turn at once', async ($, on) => {
+  test("a level named mid-turn is not rewritten mid-turn; it is the next turn's, with no judge", async ($, on) => {
     engine(on)
-    const says = { effort: 'low' }
-    judgeSaysNow(on, says)
+    const asked = judgeSaysNow(on, { effort: 'low' })
     const sent = recordSteps(on)
 
     await $.prompt.submit({ text: 'fix the typo in the readme', wait: false, origin: { kind: 'composer' } })
     await stepOf($, 't1', 0)
-    says.effort = 'high'
-    await $.prompt.submit({ text: 'actually go through every doc and fix them all', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.prompt.submit({ text: 'max effort, go through every doc and fix them all', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
     await stepOf($, 't1', 1)
+    await $.prompt.submit({ text: 'now push it', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't2', 0)
 
-    expect(sent.map(s => s.effort)).toEqual(['low', 'high'])
+    expect(asked.length).toBe(1)
+    // The second request goes out as the app sends it, not rewritten: after a typed message that is its own effort.
+    expect(sent.map(s => s.effort)).toEqual(['low', 'high', 'max'])
+  })
+
+  test('after a message typed mid-turn the app\'s own effort is what the log, debug, footer and the reply line show', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' })
+    judgeSaysNow(on, { effort: 'low' })
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    // What each request was sent with, answered with usage so the log writes its response lines.
+    const sent: { effort: unknown }[] = []
+    on('turn.step', async function* (_$, e) {
+      sent.push({ effort: e.effort })
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE } as never
+    })
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (index: number) => {
+      for await (const _ of $.turn.step({ turnId: 't1', index, model: 'claude-opus-5-5', effort: 'low', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const lastRequest = async () => String((await $.command.run({ command: 'effortless', args: 'debug' })).text).split(' | ').find(l => l.startsWith('last request:')) ?? ''
+
+    await $.prompt.submit({ text: 'Use high effort. Run the tests.', wait: false, origin: { kind: 'composer' } })
+    await at(0)
+    await at(1)
+    expect(await lastRequest()).toContain('at high')
+    await $.prompt.submit({ text: 'thanks', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await at(2)
+    // Not rewritten back to high: the app's low goes out, and that is what is recorded.
+    expect(sent.map(s => s.effort)).toEqual(['high', 'low', 'low'])
+    expect(await lastRequest()).toContain('sent claude-opus-5-5 at low')
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).toContain('response 1 at high')
+    expect(log).toContain('request 2: a message was typed mid-turn, so the app sends its own low')
+    expect(log).toContain('response 2 at low')
+    const footer = await $.ui.mount(FOOTER)
+    const level = async () => (await footer.findAll({ type: 'Text' })).map(t => t.text.trim()).find(t => /^(Low|Medium|High|Max)$/.test(t))
+    expect(await level()).toBe('Low')
+    await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 4321, isAborted: false, reason: 'answer' } as never)
+    const line = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { word: 'Worked', durationMs: 4321, isExpanded: false } } as never)
+    expect(await drawn(line)).toContain('✦ Low')
+    // Once the turn is over the footer still shows what went out last, not the turn's pick (high).
+    await footer.redraw()
+    expect(await level()).toBe('Low')
+    await Promise.all([line.unmount(), footer.unmount()])
+  })
+
+  test('the terminal rows show the last effort sent after the turn ends, and a pick made between turns once made', async ($, on) => {
+    engine(on, {}, 'claude-fable-5-2')
+    mock.clock(on)
+    judgeSaysNow(on, { effort: 'low' })
+    // The click types /effort into an empty prompt box.
+    on('prompt.read', () => ({ value: { text: '', cursor: 0 } }) as never)
+    on('prompt.fill', () => ({ isFilled: true }) as never)
+    recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (index: number) => {
+      for await (const _ of $.turn.step({ turnId: 't1', index, model: 'claude-fable-5-2', effort: 'low', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const rows = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', ...BAND } as never)
+    const lit = async () => {
+      await rows.redraw()
+      return (await rows.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('e-') && b.props.variant === 'primary')?.key
+    }
+
+    await $.prompt.submit({ text: 'Use high effort. Run the tests.', wait: false, origin: { kind: 'composer' } })
+    await at(0)
+    expect(await lit()).toBe('e-high')
+    await $.prompt.submit({ text: 'thanks', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await at(1)
+    expect(await lit()).toBe('e-low')
+    await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 1234, isAborted: false, reason: 'answer' } as never)
+    // The turn's pick was high; low is what went out last.
+    expect(await lit()).toBe('e-low')
+    // A pick between turns is what the rows show next.
+    await rows.press({ key: 'e-max' })
+    expect(await lit()).toBe('e-max')
+    await rows.unmount()
+  })
+
+  test('a message typed mid-turn that runs as its own turn is decided at that turn\'s first request, and only there', async ($, on) => {
+    engine(on)
+    const asked = judgeSaysNow(on, { effort: 'medium' })
+    const sent = recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+
+    await $.prompt.submit({ text: 'Use low effort. Reply ok.', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't1', 0)
+    await $.prompt.submit({ text: 'Use max effort. Reply queued.', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    // The queued message runs as t2: no prompt.submit starts it.
+    await stepOf($, 't2', 0)
+    await $.turn.complete({ turnId: 't2', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    // It was used up there: the next message is judged on its own.
+    await $.prompt.submit({ text: 'what does the regex mean', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't3', 0)
+
+    expect(asked.length).toBe(1)
+    expect(asked[0]).not.toContain('Reply queued')
+    expect(sent.map(s => s.effort)).toEqual(['low', 'max', 'medium'])
+  })
+
+  test('go-aheads and thanks typed mid-turn follow the rules: no judge, the session effort or low', async ($, on) => {
+    engine(on)
+    const asked = judgeSaysNow(on, { effort: 'high' })
+    const sent = recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (turnId: string) => {
+      for await (const _ of $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', effort: 'medium', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const done = (turnId: string) => $.turn.complete({ turnId, answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    const typed = (text: string, turnId?: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' }, ...(turnId ? { turnId } : {}) } as never)
+
+    await typed('Use high effort. Run the tests.')
+    await at('t1')
+    // A queued はい runs as its own turn: the session effort.
+    await typed('はい', 't1')
+    await done('t1')
+    await at('t2')
+    await done('t2')
+    // A queued ありがとう: low.
+    await typed('ありがとう', 't2')
+    await done('t2')
+    await at('t3')
+    await done('t3')
+    // A はい typed mid-turn, then はい as the next message: the session effort.
+    await typed('Use high effort. Run them again.')
+    await at('t4')
+    await typed('はい', 't4')
+    await done('t4')
+    await typed('はい')
+    await at('t5')
+
+    expect(asked.length).toBe(0)
+    expect(sent.map(s => s.effort)).toEqual(['high', 'medium', 'low', 'high', 'medium'])
+  })
+
+  test('of two levels typed mid-turn, the later one wins', async ($, on) => {
+    engine(on)
+    const asked = judgeSaysNow(on, { effort: 'high' })
+    const sent = recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+
+    await $.prompt.submit({ text: 'Use high effort. Run the tests.', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't1', 0)
+    await $.prompt.submit({ text: 'Use max effort. Do a thorough pass.', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.prompt.submit({ text: 'Actually use low effort. Just the quick check.', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    await $.prompt.submit({ text: '続けて', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't2', 0)
+
+    expect(asked.length).toBe(0)
+    expect(sent.map(s => s.effort)).toEqual(['high', 'low'])
+  })
+
+  test("only a turn's first request is rewritten, and only when the pick differs from the app's effort", async ($, on) => {
+    engine(on)
+    const says = { effort: 'high' }
+    judgeSaysNow(on, says)
+    const sent = recordSteps(on)
+    const lastRequest = async () => String((await $.command.run({ command: 'effortless', args: 'debug' })).text).split(' | ').find(l => l.startsWith('last request:')) ?? ''
+
+    await $.prompt.submit({ text: 'refactor the whole auth module across the app', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't1', 0)
+    expect(await lastRequest()).toContain('(unchanged)')
+    says.effort = 'low'
+    await $.prompt.submit({ text: 'list the files in hooks', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't2', 0)
+    await stepOf($, 't2', 1)
+    await stepOf($, 't2', 2)
+
+    expect(sent.map(s => s.effort)).toEqual(['high', 'low', 'high', 'high'])
+    // What went out: the later requests ran at the first one's low, and the log says so.
+    expect(await lastRequest()).toContain('sent claude-opus-5-5 at low')
   })
 
   test('Auto switched off or on mid-turn leaves the running turn at its effort', async ($, on) => {
@@ -3350,6 +3609,39 @@ describe('a message typed while a turn runs', () => {
     await stepOf($, 't1', 2)
 
     expect(sent.map(s => s.effort)).toEqual(['high', 'high', 'high'])
+  })
+})
+
+describe('the line under a reply', () => {
+  test('each reply shows the effort its own turn went out with, also after a later turn at another', async ($, on) => {
+    engine(on)
+    judgeSays(on, '{"model":"opus","effort":"low","why":"small"}')
+    recordSteps(on)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const turn = async (turnId: string, text: string) => {
+      await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+      for await (const _ of $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', effort: 'medium', messageCount: 1 })) {
+        // drain
+      }
+      await $.turn.complete({ turnId, answer: 'done', durationMs: took[turnId], isAborted: false, reason: 'answer' } as never)
+    }
+    // The app hands the line the turn's duration, the same number turn.complete carries, and no turn id.
+    const took: Record<string, number> = { t0: 999, t1: 2334, t2: 11914 }
+    const line = (turnId: string) => $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { word: 'Worked', durationMs: took[turnId], isExpanded: false } } as never)
+
+    await turn('t1', 'Use high effort. Reply hi.')
+    const first = await line('t1')
+    expect(await drawn(first)).toContain('✦ High')
+    await turn('t2', 'rename x to count in utils')
+    await first.redraw()
+    expect(await drawn(first)).toContain('✦ High')
+    expect(await drawn(first)).not.toContain('Low')
+    const second = await line('t2')
+    expect(await drawn(second)).toContain('✦ Low')
+    // A turn from before the plugin loaded: its effort is not known, so none is shown rather than today's.
+    const older = await line('t0')
+    expect(await drawn(older)).not.toContain('✦')
+    await Promise.all([first.unmount(), second.unmount(), older.unmount()])
   })
 })
 
@@ -3503,7 +3795,7 @@ describe('updates', () => {
     expect(await drawn(panel)).toContain('Up to date')
   })
 
-  test('the one button says Compact, opens the compact step, and stays on a narrow bar', DESK, async ($, on) => {
+  test('the one button says Compact, opens the compact step, and stays on a narrow bar', { options: { layout: 'default', handoffButton: 'advised' } } as never, async ($, on) => {
     world(on, { installed: '1.0.1', latest: '1.0.1' })
     await start($)
     await settle()
@@ -3836,7 +4128,7 @@ describe('agent panel', () => {
     expect(sent.map(s => s.effort)).toEqual(['high'])
   })
 
-  test('with Helpers off, a subagent of a judged turn runs at the turn\'s effort, never below medium', async ($, on) => {
+  test('with Helpers off, a subagent of a judged turn goes out at the app\'s effort, never rewritten', async ($, on) => {
     engine(on)
     let verdict = '{"model":"opus","effort":"xhigh","why":"hard"}'
     const asked: string[] = []
@@ -3857,9 +4149,9 @@ describe('agent panel', () => {
     verdict = '{"model":"opus","effort":"low","why":"small"}'
     await $.prompt.submit({ text: 'list the files in hooks', wait: false, origin: { kind: 'composer' } })
     await sub()
-    // No judge call for the subagent itself; it follows the turn, raised to medium at least.
+    // No judge call for the subagent itself, and no rewrite of its effort.
     expect(asked.some(p => p.includes('subagent'))).toBe(false)
-    expect(sent.map(s => s.effort)).toEqual(['xhigh', 'medium'])
+    expect(sent.map(s => s.effort)).toEqual(['medium', 'medium'])
   })
 
   test('the demo map shows the parts touched; a part opens to its files', async ($, on) => {

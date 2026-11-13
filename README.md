@@ -92,7 +92,7 @@ new version in the chat you pressed it in, with nothing to type.
 | **cache 59:00** | time until the prompt cache goes cold, after which the next message pays full price to re-read the chat |
 | *Haiku: a refactor…* | who judged and why |
 | **Auto** | switches the judge on and off. Changing effort in the app yourself also turns Auto off at your next message, and says so: you always win |
-| **Compact** | compacts the chat. It turns into a glowing **Handoff** when Haiku says a fresh chat would pay off, with Compact as quiet text beside it. Set Settings → Handoff → Handoff button to **Always** to keep Handoff on the bar |
+| **Compact** | compacts the chat. With Settings → Handoff → Handoff button on **When advised**, it turns into a glowing **Handoff** when Haiku says a fresh chat would pay off, with Compact as quiet text beside it. **Always** (the default) keeps Handoff on the bar and never asks Haiku |
 | **⚙** | settings |
 
 Prefer it quiet? Settings → Customize has a **Minimal** look with no bar. It also sets the **Appearance** (match Claude Code, dark or light) and the **Theme** (violet, Claude orange or cherry blossom).
@@ -108,7 +108,7 @@ git and saves `HANDOFF.md` (or runs your own skill). Then clear and carry on, cl
 
 <p align="center"><img src="docs/readme/handoff.png" alt="The Handoff bar with Quick and Full" width="100%"></p>
 
-**Compact** takes an optional note for what the summary should keep. Every compaction, also `/compact` and the automatic one, is written by **Haiku 5.5** by default, which Anthropic recommends for compaction at a fraction of the chat model's price; if Haiku fails, Claude Code compacts as usual. Switch it in Settings → Handoff → Compact with.
+**Compact** takes an optional note for what the summary should keep. Every compaction, also `/compact` and the automatic one, can be written by **Haiku 5.5**, which Anthropic recommends for compaction at a fraction of the chat model's price; if Haiku fails, Claude Code compacts as usual. By default the chat's own model does it, as Claude Code does; switch it in Settings → Handoff → Compact with.
 
 <p align="center"><img src="docs/readme/compact.png" alt="The Compact bar with an optional summary field" width="100%"></p>
 
@@ -121,7 +121,7 @@ limit passes 80% (with a Save mode that caps effort at Medium), and when your ju
 
 ## Haiku, and Jev if you add it
 
-Haiku 5.5 runs on your own Claude login and needs no key. It always makes the handoff call: from 30% of context, every second message, it reads what the chat was for, the trail of topics, the last reply and how full the context is, and says a fresh chat would suit only for a clear reason. Then the Compact button turns into a lit Handoff with the reason. Want Handoff on the bar all the time? Settings → Handoff → Handoff button → **Always**.
+Haiku 5.5 runs on your own Claude login and needs no key. With the Handoff button on **When advised**, it makes the handoff call: from 30% of context, every second message, it reads what the chat was for, the trail of topics, the last reply and how full the context is, and says a fresh chat would suit only for a clear reason. Then the Compact button turns into a lit Handoff with the reason. The default, **Always**, keeps Handoff on the bar and asks Haiku nothing.
 
 Haiku also picks the effort, unless you add Jev, TypeSafe's faster judge (about 0.25 s against about 1 s). With a key, Jev answers the effort first and Haiku steps in whenever Jev is unsure. Run `/plugin configure effortless@effortless` in Claude Code, or use the setup guide or the Judge card in Settings.
 
@@ -133,7 +133,7 @@ Haiku also picks the effort, unless you add Jev, TypeSafe's faster judge (about 
 
 A key set with `/plugin configure` is kept in Claude Code's secure storage. A key pasted in the setup guide or the Judge card is written in plain text to `~/.config/jev/.env` (the file the jev skills read), never to a file of this repo. If Jev fails or takes longer than 3 seconds, Haiku judges that prompt and effortless tells you why once per session (out of credits, key rejected, no answer).
 
-Short follow-ups such as "go", "ok" or "yes" keep the effort already picked and ask no judge.
+Short go-aheads such as "go", "ok", "はい" or "続けて" ask no judge and run at the session's own effort (set with `/effort` or `--effort`), so nothing is rewritten: set the session to the level you usually work at. Name a level ("high effort") to keep a higher one. Thanks alone ("ありがとう", "thanks") runs at low.
 
 ## Keys and trust
 
@@ -198,7 +198,7 @@ What this does and does not show:
 
 ## Models
 
-Effort only changes on Opus 5.5 and Sonnet 5.5. On Fable 5.1 and older models a change of effort between requests rewrote most of the prompt cache, which costs more than it saves, so Auto pauses there and the footer says `Paused`. Haiku takes no effort setting.
+Effort only changes on Opus 5.5, Sonnet 5.5 and Fable 5.2, and only on a turn's first request, when the pick differs from the app's own effort: later requests of a turn run at whatever the first went out with, until you type a message while the turn runs. The app then goes back to its own effort for the rest of that turn, and the footer, the line under the reply and the log say so. On Fable 5.1 and older models a change of effort between requests rewrote most of the prompt cache, which costs more than it saves, so Auto pauses there and the footer says `Paused`. Haiku takes no effort setting.
 
 ## Split view
 

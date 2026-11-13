@@ -13,7 +13,7 @@ export const MODELS: { key: ModelKey; label: string; long: string; id: string }[
   { key: 'haiku', label: 'Haiku', long: 'Haiku 5.5', id: 'claude-haiku-5-5' },
   { key: 'sonnet', label: 'Sonnet', long: 'Sonnet 5.5', id: 'claude-sonnet-5-5' },
   { key: 'opus', label: 'Opus', long: 'Opus 5.5', id: 'claude-opus-5-5' },
-  { key: 'fable', label: 'Fable', long: 'Fable 5.1', id: 'claude-fable-5-1' },
+  { key: 'fable', label: 'Fable', long: 'Fable 5.2', id: 'claude-fable-5-2' },
 ]
 export const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 // What one token costs relative to an uncached input token, the same ratios on every Claude model. Measured over
@@ -22,7 +22,7 @@ export const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const WEIGHT = { input: 1, write: 1.25, read: 0.1, out: 5 }
 // Changing effort between two requests keeps the prompt cache on these models only. On Fable 5.1 and older Opus
 // the next request rewrote 56-100% of the cache (measured), which costs more than any effort can save.
-export const cacheSafe = (modelId: string) => /(opus|sonnet)-5-5/.test(modelId)
+export const cacheSafe = (modelId: string) => /(opus|sonnet)-5-5|fable-5-2/.test(modelId)
 // The accent the effort in the footer is written in: the brand violet, or Claude orange when the theme says so.
 let ACCENT = accent()
 /** Takes the theme the settings name; the accent and every drawing follow it. */
@@ -470,10 +470,27 @@ export function namedEffort(text: string): Effort | undefined {
   return undefined
 }
 
-/** A short follow-up such as "go", "ok", "yes", "continue": two words and a dozen characters at most. */
+// Go-aheads and thanks, matched by word: Japanese has no spaces, so a length rule made every short request ("テスト直して")
+// a go-ahead. Words may repeat and run together ("はいお願いします", "ありがとう、助かった"), with punctuation between.
+const ACK_WORDS = ['ok', 'okay', 'k', 'yes', 'y', 'yep', 'yeah', 'sure', 'go', 'go ahead', 'continue', 'next', 'proceed', 'lgtm', 'please',
+  'はい', 'うん', 'ええ', 'おけ', 'おk', 'おっけー', '了解', 'りょ', 'りょうかい', '続けて', 'つづけて', '続きを', '続き', '進めて', 'すすめて',
+  'お願いします', 'おねがいします', 'お願い', 'おねがい', 'それで', 'いいよ', 'いいね', 'どうぞ', 'やって', 'よろしく', '頼む', 'たのむ',
+  'わかりました', '分かりました', 'わかった', '分かった', 'ください', 'です']
+const THANKS_WORDS = ['thanks', 'thank you', 'thx', 'ty', 'ありがとうございます', 'ありがとうございました', 'ありがとう', 'ありがと',
+  'サンキュー', 'さんきゅ', '助かりました', '助かります', '助かった', '助かる', '感謝']
+const wordsOnly = (words: string[]) =>
+  new RegExp(`^(?:(?:${[...words].sort((a, b) => b.length - a.length).join('|')})[\\s、。,.!！?？…~〜ー笑w]*)+$`)
+const ACK_OR_THANKS = wordsOnly([...ACK_WORDS, ...THANKS_WORDS])
+const THANKS_ONLY = wordsOnly(THANKS_WORDS)
+
+/** A go-ahead such as "go", "ok", "はい", "続けて", or thanks: nothing but words from the lists. */
 export function isFollowUp(text: string): boolean {
-  const t = text.trim()
-  return t.length > 0 && t.length <= 12 && t.split(/\s+/).length <= 2
+  return ACK_OR_THANKS.test(text.trim().toLowerCase())
+}
+
+/** Thanks and nothing else ("ありがとう", "thanks!"): low by rule, no judge. */
+export function isThanks(text: string): boolean {
+  return THANKS_ONLY.test(text.trim().toLowerCase())
 }
 
 /**
@@ -497,18 +514,78 @@ export function withAttachments(text: string, attachments?: readonly { type: str
 [The message comes with ${said} to look at.]`
 }
 
-/** The message as the judge reads it when it was typed while a task was still running. */
-export function withMidTurn(text: string, effort: Effort): string {
+/** The message as the judge reads it when messages typed during the last turn were carried over to it. */
+export function withCarried(text: string, carried: string): string {
   return `${text}
 
-[Sent while the assistant was still working on the last task at ${effort} effort. If it adds to, corrects or steers that task, keep ${effort}; judge it on its own only if it is a separate new request.]`
+[Typed earlier, while the last task was still running, and not judged then: ${carried}]`
 }
-// A lower verdict for a message typed mid-turn, applied when that turn ends (see prompt.submit).
-let heldPick: Pick | null = null
+// Messages typed while a turn ran. The running turn's effort is not changed for them (no judge, no rewrite), so they are
+// decided at the start of the next turn: with the next message (prompt.submit), or, when one of them runs as a turn of
+// its own and no message starts it, at that turn's first request (turn.step).
+let carried: string[] = []
+// A message started the coming turn (prompt.submit), so its first request needs no decision of its own.
+let freshTurn = false
+
+/** The level named last in messages typed during a turn: a later correction ("actually low effort") wins. */
+export function lastNamed(texts: readonly string[]): Effort | undefined {
+  for (const t of [...texts].reverse()) {
+    const named = namedEffort(t)
+    if (named) return named
+  }
+  return undefined
+}
 
 /** A short follow-up that keeps the current effort: "go" between two steps, not an answer to a question. */
 export function keepsEffort(message: string, context: string): boolean {
   return isFollowUp(message) && !endsOnQuestion(context)
+}
+
+/** The pick a verdict makes, within the person's slider, Min, Max and save mode. */
+async function followVerdict($: EngineInterface, verdict: Pick, inUse: ModelKey) {
+  const saving = (await read($, saveUntil)) !== null
+  const leaned = bounded(tipped(verdict.effort, verdict.sure, config.bias), config.floor, config.ceiling)
+  const effort = capped(leaned, saving)
+  const why = effort !== leaned ? 'save mode' : leaned !== verdict.effort ? 'your settings' : verdict.why
+  await choose($, { ...verdict, model: inUse, effort, why })
+}
+
+/** Thanks: low within Min and Max. A go-ahead: the session's own effort, so nothing is rewritten. No judge either way. */
+async function pickByRule($: EngineInterface, thanks: boolean, said: string) {
+  const inUse = await sessionModel($)
+  const session = EFFORTS.includes(engineEffort as Effort) ? (engineEffort as Effort) : undefined
+  const effort = thanks ? bounded('low', config.floor, config.ceiling) : session
+  await choose($, effort ? { model: inUse, effort, why: thanks ? 'thanks' : 'a go-ahead: the session effort', by: 'rule' } : null)
+  if (routed) routed = null
+  await countPrompt($, inUse !== 'haiku' ? effort : undefined, 'rule', 0, 0)
+  void proof($, `${thanks ? 'thanks' : 'follow-up'} "${said.slice(0, 50)}": ${effort ?? 'the session effort (not seen yet)'} by rule, no judge`)
+}
+
+/** Messages typed mid-turn that carry work: go-aheads and thanks carry none, so they never send a message to the judge. */
+export function carriesWork(texts: readonly string[]): string[] {
+  return texts.filter(t => !isFollowUp(t))
+}
+
+/** A turn no message started (a message typed mid-turn that runs as its own turn): what was typed decides it now. */
+async function decideCarried($: EngineInterface) {
+  const all = carried
+  const texts = carriesWork(all)
+  carried = []
+  // Only go-aheads or thanks were typed: the same rules as for a message that starts a turn.
+  if (!texts.length) return pickByRule($, all.every(isThanks), all.join(' '))
+  const inUse = await sessionModel($)
+  const named = lastNamed(texts)
+  if (named) {
+    await choose($, { model: inUse, effort: named, why: 'you asked for it', by: 'named' })
+    await countPrompt($, inUse !== 'haiku' ? named : undefined, 'named', 0, 0)
+    void proof($, `turn started by a message typed mid-turn: named level ${named}, no judge`)
+    return
+  }
+  const startedAt = Date.now()
+  const { verdict, tokens } = await judge($, texts.join('\n'), { model: inUse, effort: (await read($, pick))?.effort ?? 'medium', why: '', by: 'manual' })
+  await countPrompt($, inUse !== 'haiku' ? verdict?.effort : undefined, verdict?.by, Date.now() - startedAt, tokens)
+  if (verdict) await followVerdict($, verdict, inUse)
+  void proof($, `turn started by a message typed mid-turn: ${verdict ? `judged by ${verdict.by}: ${verdict.effort}` : 'no verdict'}`)
 }
 
 /** The TypeSafe key in a ~/.config/jev/.env file's text, the same file the jev-* skills read. */
@@ -635,7 +712,7 @@ export type Hideable = (typeof HIDEABLE)[number]
 // What the app passed to register, so settings kept in the store can be laid over it at session start.
 let pluginOptions: Record<string, unknown> = {}
 let config: JudgeConfig = {
-  judge: 'auto',
+  judge: 'haiku',
   typesafeKey: '',
   handoffSkill: '',
   handoffAfter: 'continue',
@@ -645,8 +722,8 @@ let config: JudgeConfig = {
   hide: ['reason'],
   swampAt: 70,
   layout: 'default',
-  compactWith: 'haiku',
-  handoffButton: 'advised',
+  compactWith: 'session',
+  handoffButton: 'always',
   modelAuto: 'off',
   helpers: 'off',
   theme: 'violet',
@@ -659,7 +736,7 @@ export function readConfig(options: unknown): JudgeConfig {
   const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
   const picked = str(o.judge)
   return {
-    judge: picked === 'haiku' || picked === 'jev' ? picked : 'auto',
+    judge: picked === 'auto' || picked === 'jev' ? picked : 'haiku',
     typesafeKey: str(o.typesafeKey),
     handoffSkill: str(o.handoffSkill).replace(/^\//, ''),
     handoffAfter: (['confirm', 'copy'] as const).find(a => a === str(o.handoffAfter)) ?? 'continue',
@@ -668,8 +745,8 @@ export function readConfig(options: unknown): JudgeConfig {
     ceiling: EFFORTS.includes(str(o.effortCeiling) as Effort) ? (str(o.effortCeiling) as Effort) : 'max',
     swampAt: SWAMP_STEPS.includes(Number(str(o.swampAt)) as (typeof SWAMP_STEPS)[number]) ? Number(str(o.swampAt)) : 70,
     layout: str(o.layout) === 'minimal' ? 'minimal' : 'default',
-    compactWith: str(o.compactWith) === 'session' ? 'session' : 'haiku',
-    handoffButton: str(o.handoffButton) === 'always' ? 'always' : 'advised',
+    compactWith: str(o.compactWith) === 'haiku' ? 'haiku' : 'session',
+    handoffButton: str(o.handoffButton) === 'advised' ? 'advised' : 'always',
     // Off unless switched on: one prompt on another model rewrites the whole chat into that model's cache, which costs
     // more than it saves in a chat that is in use (measured 2026-10-10).
     modelAuto: str(o.modelAuto) === 'on' ? 'on' : 'off',
@@ -1071,6 +1148,28 @@ let engineEffort: string | undefined
 let pickCarried = false
 // The last main-chat request, for /effortless debug: what the app asked for and what the mod sent instead, if anything.
 let lastRequest: { index: number; appModel: string; appEffort: unknown; model: string; effort: unknown; at: number } | null = null
+// The effort the running turn's requests go out at: the first one's, which its later requests keep whatever they carry,
+// until a message is typed mid-turn. Then the app goes back to its own effort (measured in the 2.1.323 terminal: the next
+// request went out at the session's, not the turn's), and a request goes out at what it carries. The footer and the
+// logs show this, not the pick. It stays after the turn ends, and is cleared by the next message or by a new pick made
+// between turns (choose), which the footer then shows.
+// shortcut: in a stream-json run the turn's effort was seen to carry on past a typed message too; this then shows the
+// session's. Read the transcript's output_config.effort to be sure.
+let sentNow: Effort | undefined
+// A message was typed while this turn ran (prompt.submit with its turn id).
+let typedThisTurn = false
+/** The effort a main-chat request carrying `carried` goes out at (see sentNow). */
+function goesOutAt(index: number, carried: unknown): Effort | undefined {
+  if (index > 0 && sentNow && !typedThisTurn) return sentNow
+  return EFFORTS.includes(carried as Effort) ? (carried as Effort) : undefined
+}
+// The effort each main-chat turn's last request went out at (null: it carried none, as on Haiku), by turn id while it
+// runs, and by its duration once it ends: the line under a reply (TurnDuration) gets the turn's duration and no turn
+// id (2.1.323, measured), and shows its own turn's effort, not the one in use now.
+// shortcut: two turns that took the same millisecond share an entry, the later wins; key by message once the app
+// passes one to TurnDuration.
+const sentByTurn = new Map<string, Effort | null>()
+const sentByDuration = new Map<number, Effort | null>()
 // The slash command this mod last typed into the prompt box.
 let lastTyped = ''
 // The toast about pressing Enter is shown once; on every click it is only noise.
@@ -2046,8 +2145,8 @@ async function closeSetup($: EngineInterface) {
 
 /** The person picked a judge in the guide: then the judge's key or URL, or the next step. Saved at the end. */
 async function pickJudge($: EngineInterface, choice: 'haiku' | 'jev') {
-  // Haiku is saved as Auto: Jev whenever a TypeSafe key is there, Haiku otherwise and whenever Jev does not answer.
-  await update($, setupDraft, d => ({ ...d, judge: choice === 'haiku' ? 'auto' : choice }))
+  // Haiku is saved as haiku: Jev only on an explicit jev (or auto in the settings), never by a key that happens to be set.
+  await update($, setupDraft, d => ({ ...d, judge: choice }))
   await markSetupDone($)
   if (choice === 'haiku') {
     $.ui.toast('effortless: Haiku 5.5 judges, no key needed. Add a Jev key later for faster answers.')
@@ -2131,6 +2230,9 @@ async function toggleAutoEffort($: EngineInterface) {
 
 async function choose($: EngineInterface, next: Pick | null) {
   pickCarried = false
+  // A pick made between turns (a click, a model switch) is what the footer shows next; during a turn it stays on the
+  // effort that turn went out at.
+  if (!turnBusy()) sentNow = undefined
   const before = await read($, pick)
   await Promise.all([update($, pick, () => next), $.store.set('pick', next)])
   // A change Auto made is shown as "Low → High" for a moment, so the switch is seen.
@@ -2249,6 +2351,8 @@ function hoverTips(v: Snap): { effort: string; cache: string } {
 /** The effort to show: yours or the judge's, else what the app itself runs with; none on Haiku. */
 function effortOf(v: Snap, inUse: ModelKey): Effort | undefined {
   if (inUse === 'haiku') return undefined
+  // The effort the last request went out at, from the turn's start until the next message or a pick between turns.
+  if (sentNow) return sentNow
   if (v.current) return v.current.effort
   return EFFORTS.includes(v.shownByApp as Effort) ? (v.shownByApp as Effort) : undefined
 }
@@ -3260,7 +3364,7 @@ async function dashboardBand($: EngineInterface, e: RenderInput<'AbovePrompt'>) 
   const effortNow = effortOf(v, v.modelNow ?? (await sessionModel($)))
   const by = v.current?.by
   const reason = v.current
-    ? `${by === 'manual' || by === 'named' ? 'You' : by === 'jev' ? 'Jev' : 'Haiku'}: ${v.current.why}`
+    ? `${by === 'manual' || by === 'named' ? 'You' : by === 'jev' ? 'Jev' : by === 'rule' ? 'Rule' : 'Haiku'}: ${v.current.why}`
     : v.auto
       ? 'Auto picks the effort at the next prompt'
       : 'You pick the effort'
@@ -3543,7 +3647,7 @@ async function effortRows($: EngineInterface, e: RenderInput<'AbovePrompt'>, opt
     : notAligned
       ? `/effort shows ${EFFORT_LABELS[shownByApp as Effort] ?? shownByApp}`
       : current
-        ? `${current.by === 'manual' ? 'You' : current.by === 'jev' ? 'Jev' : 'Haiku'}: ${current.why}`
+        ? `${current.by === 'manual' || current.by === 'named' ? 'You' : current.by === 'jev' ? 'Jev' : current.by === 'rule' ? 'Rule' : 'Haiku'}: ${current.why}`
         : auto
           ? 'Picks the effort at the next prompt'
           : 'Pick an effort'
@@ -3875,12 +3979,9 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId) await agentEnded($, e.agentId, e.reason)
     if (!e.agentId) await setTurnBusy($, false)
-    // A lower verdict for a message typed during the turn takes over now, if Auto is still on.
-    if (!e.agentId && heldPick) {
-      const held = heldPick
-      heldPick = null
-      if (await read($, isAuto)) await choose($, held)
-    }
+    if (!e.agentId && typeof e.durationMs === 'number' && sentByTurn.has(e.turnId)) sentByDuration.set(e.durationMs, sentByTurn.get(e.turnId) ?? null)
+    // sentNow stays: until the next message, the footer and the band show the effort the turn last went out at.
+    if (!e.agentId) typedThisTurn = false
     // The newest reply's text: its last block carries the warning card (see AssistantMessage).
     if (!e.agentId && e.reason === 'answer') await update($, lastAnswer, () => e.answer.trim())
     if (!e.agentId && turnCost > 0) await update($, lastTurn, () => ({ cost: turnCost, ms: e.durationMs ?? 0 }))
@@ -4047,13 +4148,18 @@ Saved to ${out}.md and .json` }
 
   on('prompt.submit', async ($, e, next) => {
     await setTurnBusy($, true)
+    if (e.turnId === undefined) {
+      sentNow = undefined
+      freshTurn = true
+    } else typedThisTurn = true
     turnCost = 0
     // A landed handoff's card goes once the next message is sent.
     const card = await read($, handoffCard)
     if (card && (card.kind === 'done' || card.kind === 'copied')) await update($, handoffCard, () => null)
     const byPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
-    // The handoff check runs for every message the person types, whatever the effort judge is doing (or whether Auto is on).
-    if (byPerson && !e.text.trim().startsWith('/') && !isFollowUp(e.text)) void checkHandoff($, e.text).catch(() => undefined)
+    // The handoff check (a Haiku call) runs only for the advised button, for every message the person types, whatever
+    // the effort judge is doing (or whether Auto is on).
+    if (config.handoffButton === 'advised' && byPerson && !e.text.trim().startsWith('/') && !isFollowUp(e.text)) void checkHandoff($, e.text).catch(() => undefined)
     const wantsEffort = await read($, isAuto)
     const wantsModel = await read($, isAutoModel)
     // A typed slash command is judged only when it is a skill or a custom command (what the person added); the app's own
@@ -4065,32 +4171,42 @@ Saved to ${out}.md and .json` }
     const modelId = await $.session.model()
     await modelIs($, modelId)
     if (!cacheSafe(modelId) && keyOf(modelId) !== 'haiku') return next(e)
-    // "go", "ok", "yes" between two steps of work keep the effort Auto already chose; no judge is asked.
-    const before = await read($, pick)
-    // A message with an image is never a bare follow-up: "fix this" plus a screenshot is new work.
-    // Typed while a turn ran (e.turnId), it often steers that task: the judge is told, so it can keep the effort.
-    const midTurn = e.turnId !== undefined && before !== null
     const said = skill ? `${e.text}
 
 [This is a slash command that runs a skill: ${skill.description || skill.name}. Judge the work the skill will do.]` : e.text
-    const shown = midTurn ? withMidTurn(withAttachments(said, e.attachments), before.effort) : withAttachments(said, e.attachments)
-    if (wantsEffort && before && before.by !== 'manual' && !e.attachments?.length && !slash && isFollowUp(e.text) && keepsEffort(e.text, await recentContext($).catch(() => ''))) {
-      await countPrompt($, before.effort, undefined, 0, 0)
-      void proof($, `follow-up "${e.text.trim()}": keeping ${before.effort}`)
+    // Typed while a turn ran (e.turnId): that turn's effort can no longer change, so no judge is asked now. The message
+    // is carried to the next one and judged with it, at the start of the next turn.
+    if (e.turnId !== undefined) {
+      carried.push(withAttachments(said, e.attachments))
+      void proof($, `typed mid-turn: "${e.text.slice(0, 50)}" waits for the next turn, no judge`)
+      return next(e)
+    }
+    const earlier = carriesWork(carried)
+    carried = []
+    const shown = earlier.length ? withCarried(withAttachments(said, e.attachments), earlier.join('\n')) : withAttachments(said, e.attachments)
+    const before = await read($, pick)
+    // A message with an image is never a bare follow-up: "fix this" plus a screenshot is new work; nor is one with
+    // messages carried from the last turn that may have steered it (carried go-aheads and thanks were dropped above).
+    const bare = wantsEffort && !e.attachments?.length && !slash && !earlier.length
+    // Thanks and nothing else: low by rule, within the person's Min and Max. No judge.
+    if (bare && isThanks(e.text)) {
+      await pickByRule($, true, e.text.trim())
+      $.ui.invalidate('ui.render')
+      return next(e)
+    }
+    // "go", "ok", "はい" between two steps of work: nothing to change, so the session's own effort goes out, with no
+    // rewrite and no judge. A level above it is kept only by naming it again.
+    if (bare && before?.by !== 'manual' && isFollowUp(e.text) && keepsEffort(e.text, await recentContext($).catch(() => ''))) {
+      await pickByRule($, false, e.text.trim())
+      $.ui.invalidate('ui.render')
       return next(e)
     }
     // "max effort", "effort: low": the person said the level, so it runs, past Min, Max and save mode, and no judge is asked.
-    const named = wantsEffort && !slash ? namedEffort(e.text) : undefined
+    const named = wantsEffort && !slash ? namedEffort(e.text) ?? lastNamed(earlier) : undefined
     if (named) {
       const inUse = await sessionModel($)
-      const applied: Pick = { model: inUse, effort: named, why: 'you asked for it', by: 'named' }
-      const running = await read($, pick)
-      if (midTurn && running && EFFORTS.indexOf(named) < EFFORTS.indexOf(running.effort)) heldPick = applied
-      else {
-        heldPick = null
-        await choose($, applied)
-      }
-      if (!midTurn && routed) routed = null
+      await choose($, { model: inUse, effort: named, why: 'you asked for it', by: 'named' })
+      if (routed) routed = null
       await countPrompt($, inUse !== 'haiku' ? named : undefined, 'named', 0, 0)
       void proof($, `named level ${named} in "${e.text.slice(0, 50)}": no judge`)
       $.ui.invalidate('ui.render')
@@ -4126,25 +4242,9 @@ Saved to ${out}.md and .json` }
       if (verdict) {
         // Effort follows the verdict at once, when Auto is on for effort. The model stays: switching it
         // reloads the context, so with Auto on for model it is only suggested.
-        if (wantsEffort) {
-          const saving = (await read($, saveUntil)) !== null
-          const leaned = bounded(tipped(verdict.effort, verdict.sure, config.bias), config.floor, config.ceiling)
-          const effort = capped(leaned, saving)
-          const why = effort !== leaned ? 'save mode' : leaned !== verdict.effort ? 'your settings' : verdict.why
-          const applied: Pick = { ...verdict, model: inUse, effort, why }
-          // Mid-turn, a lower verdict would cut the running task's effort for its remaining steps: it waits for the
-          // turn to end (the queued message may run as a turn of its own). A higher one helps the task, so it applies.
-          const running = await read($, pick)
-          if (midTurn && running && EFFORTS.indexOf(effort) < EFFORTS.indexOf(running.effort)) {
-            heldPick = applied
-            void proof($, `typed mid-turn: ${effort} waits, the running turn keeps ${running.effort}`)
-          } else {
-            heldPick = null
-            await choose($, applied)
-          }
-        }
-        // A prompt the judge calls simple runs on a cheaper model; a message typed mid-turn leaves the running choice.
-        if (!midTurn) {
+        if (wantsEffort) await followVerdict($, verdict, inUse)
+        // A prompt the judge calls simple runs on a cheaper model.
+        {
           let to = wantsEffort && config.modelAuto === 'on' ? routeTo(verdict.model, inUse) : null
           // The last prompt ran on a cheaper model and this one says it was wrong: that is a miss. The retry runs on the
           // chat's own model, and so do the next few prompts.
@@ -4196,7 +4296,15 @@ Saved to ${out}.md and .json` }
   on('turn.step', async function* ($, e, next) {
     // Every main-conversation response, whatever its effort, keeps the cache warm for its lifetime from now.
     const send = async function* (request: typeof e) {
-      if (e.agentId === undefined) lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: request.effort, at: Date.now() }
+      if (e.agentId === undefined) {
+        // A later request goes out at the effort of the turn's first, whatever it carries.
+        const out = goesOutAt(e.index, request.effort)
+        if (e.index > 0 && typedThisTurn && out !== sentNow) void proof($, `request ${e.index}: a message was typed mid-turn, so the app sends its own ${out ?? 'none'}`)
+        sentNow = out
+        sentByTurn.set(e.turnId, sentNow ?? null)
+        lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: sentNow ?? request.effort, at: Date.now() }
+        if (e.index === 0 && request.effort !== e.effort) void proof($, `request ${e.index} (${request.model}): effort ${e.effort ?? 'none'} -> ${request.effort ?? 'none'} sent`)
+      }
       const answer = yield* next(request)
       // Inside the hook ($ calls after it returns are refused), and never allowed to break the request.
       if (e.agentId === undefined && answer?.usage) markWarm(request.model, answer.usage, await $.clock.now().catch(() => Date.now()))
@@ -4228,12 +4336,23 @@ Saved to ${out}.md and .json` }
         return yield* send(e)
       }
     }
-    // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort.
+    if (e.agentId === undefined && e.index === 0) {
+      if (carried.length && !freshTurn) {
+        if ((await read($, isAuto)) && cacheSafe(e.model)) await decideCarried($)
+        else carried = []
+      }
+      freshTurn = false
+      typedThisTurn = false
+    }
+    // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort (on the first
+    // request only, like any effort change).
     if (e.agentId === undefined && routed && (await read($, isAuto))) {
       const to = MODELS.find(m => m.key === routed)!.id
       const picked = await read($, pick)
-      const effort = picked?.effort ?? e.effort
-      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${effort}`)
+      const effort = e.index === 0 ? (picked?.effort ?? e.effort) : e.effort
+      // The same effort /effortless debug reports for this request (lastRequest, see sentNow).
+      // shortcut: what a cheaper model is sent on a later request is not measured; check its transcript to be sure.
+      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${goesOutAt(e.index, effort) ?? effort ?? 'none'}`)
       const result = yield* send({ ...e, model: to, effort })
       if (picked && picked.by !== 'manual' && result.usage) await tally($, picked.effort, result.usage)
       return result
@@ -4254,24 +4373,28 @@ Saved to ${out}.md and .json` }
     // Auto off: the app's own effort goes out. A pick the judge made while Auto was on is not the person's choice, and
     // with the app already on the effort they want, the mod would never see a change to give way to.
     if (p.by !== 'manual' && !(await read($, isAuto))) return yield* send(e)
-    // A subagent of a turn Auto picked for (Helpers off, or no verdict for it) runs at that turn's effort, no extra
+    // With Helpers on, a subagent of a turn Auto picked for (no verdict for it) runs at that turn's effort, no extra
     // judge call, but never below medium: a helper's answer goes back unchecked (see helperFloor). A subagent whose
     // definition sets its own effort cannot be told apart from one that inherits it, so it follows the turn too.
+    // Helpers off (the default): subagents go out as the app sends them.
     if (e.agentId !== undefined) {
-      if (p.by === 'manual') return yield* send(e)
+      if (p.by === 'manual' || config.helpers !== 'on') return yield* send(e)
       const floor = helperFloor(config.floor, config.ceiling)
       const effort = EFFORTS.indexOf(p.effort) < EFFORTS.indexOf(floor) ? floor : p.effort
       if (e.index === 0) void proof($, `subagent ${e.agentId} (${e.model}): effort ${e.effort ?? 'none'} -> ${effort}, the turn's`)
       return yield* send({ ...e, effort })
     }
-    if (e.agentId === undefined) void proof($, `request ${e.index} (${e.model}): effort ${e.effort ?? 'none'} -> ${p.effort}`)
-    const result = yield* send({ ...e, effort: p.effort })
-    // Only requests Auto steered count.
-    if (e.agentId === undefined && p.by !== 'manual' && result.usage) {
-      await tally($, p.effort, result.usage)
+    // Only a turn's first request carries a change: later ones run at whatever it went out with (measured on Fable 5.2,
+    // 0 of 20 later rewrites were sent), until a message is typed mid-turn (see sentNow). A pick equal to the app's own
+    // effort needs no rewrite at all.
+    const rewrite = e.index === 0 && p.effort !== e.effort
+    const result = yield* send(rewrite ? { ...e, effort: p.effort } : e)
+    // Only requests Auto steered count, at the effort that went out.
+    if (p.by !== 'manual' && result.usage && sentNow) {
+      await tally($, sentNow, result.usage)
       void proof(
         $,
-        `response ${e.index} at ${p.effort}: ${result.usage.output_tokens} out, ${result.usage.cache_read_input_tokens ?? 0} cache read, ${result.usage.cache_creation_input_tokens ?? 0} cache write`,
+        `response ${e.index} at ${sentNow}: ${result.usage.output_tokens} out, ${result.usage.cache_read_input_tokens ?? 0} cache read, ${result.usage.cache_creation_input_tokens ?? 0} cache write`,
       )
     }
     return result
@@ -4468,12 +4591,15 @@ Saved to ${out}.md and .json` }
     if (config.hide.includes('line')) return next(e)
     const { Box, Text } = themedEls($.ui.resolve(e))
     const v = await snap($)
-    const effortNow = effortOf(v, v.modelNow ?? 'sonnet')
+    // The effort this reply's turn last went out at. A turn from before the plugin (re)loaded has no record, and the
+    // effort in use now may differ from the one it was sent at, so none is shown for it.
+    const id = (e.props as { turnId?: string }).turnId
+    const sentThen = id !== undefined && sentByTurn.has(id) ? sentByTurn.get(id) : sentByDuration.get(e.props.durationMs)
     const took = Math.max(1, Math.round(e.props.durationMs / 1000))
     return (
       <Box key="turn-line" flexDirection="row" gap={1}>
         <Text dimColor>{`${e.props.word} ${took < 60 ? `${took}s` : `${Math.floor(took / 60)}m ${took % 60}s`}`}</Text>
-        <Text color={ACCENT}>{`✦ ${effortNow ? EFFORT_LABELS[effortNow] : 'Auto'}`}</Text>
+        {sentThen === undefined ? null : <Text color={ACCENT}>{`✦ ${sentThen ? EFFORT_LABELS[sentThen] : 'Auto'}`}</Text>}
         {v.cacheNow === null ? null : (
           <Text dimColor={cacheColor(v.cacheNow) === undefined} color={cacheColor(v.cacheNow)}>{`· ${v.cacheNow <= 0 ? 'cache cold' : `cache ${cacheLabel(v.cacheNow)}`}`}</Text>
         )}
