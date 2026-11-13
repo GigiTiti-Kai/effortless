@@ -8,7 +8,7 @@
       "type": "string",
       "title": "Judge",
       "description": "Haiku (your own Claude login, no key) always judges handoffs and, unless Jev answers, the effort. auto: Jev as well when a TypeSafe key is set. haiku: Haiku only. jev: Jev as well, and its key may also come from ~/.config/jev/.env.",
-      "default": "auto",
+      "default": "haiku",
       "options": [
         "auto",
         "haiku",
@@ -107,8 +107,8 @@
     "handoffButton": {
       "type": "string",
       "title": "Handoff button",
-      "description": "advised: the button is Compact, and turns into a glowing Handoff when Haiku says a fresh chat would pay off. always: the button is always Handoff.",
-      "default": "advised",
+      "description": "advised: the button is Compact, and turns into a glowing Handoff when Haiku (asked every few messages once the chat is long) says a fresh chat would pay off. always (default): the button is always Handoff, and Haiku is never asked.",
+      "default": "always",
       "options": [
         "advised",
         "always"
@@ -117,8 +117,8 @@
     "compactWith": {
       "type": "string",
       "title": "Compact with",
-      "description": "haiku: Haiku 5.5 writes the summary when the chat is compacted (far cheaper). session: the chat's own model, as Claude Code does it.",
-      "default": "haiku",
+      "description": "haiku: Haiku 5.5 writes the summary when the chat is compacted (far cheaper). session (default): the chat's own model, as Claude Code does it.",
+      "default": "session",
       "options": [
         "haiku",
         "session"

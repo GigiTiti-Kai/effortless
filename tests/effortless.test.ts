@@ -1,7 +1,7 @@
 import { describe, expect, mock, test as baseTest } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
+import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
 import { ART_COLUMNS, artFrame, artPixel, MOVING } from '../hooks/art'
 import { isLight, lightHex, lightProps, setLight, setTheme, themedEls, themedSvg, tint, tintHex } from '../hooks/theme'
 import { importsOf, moduleLinks, moduleOf, relPath, withTouch } from '../hooks/agents'
@@ -226,7 +226,7 @@ describe('auto', () => {
     expect(sent[0]).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
   })
 
-  test('Jev on TypeSafe decides when TYPESAFE_API_KEY is set, with typed questions, and Haiku is not asked', async ($, on) => {
+  test('Jev on TypeSafe decides when TYPESAFE_API_KEY is set, with typed questions, and Haiku is not asked', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' })
     mock.clock(on)
     const asked = judgeSays(on, '{"model":"haiku","effort":"low","why":"x"}')
@@ -666,6 +666,7 @@ describe('helpers', () => {
     expect(cacheSafe('claude-opus-5-5')).toBe(true)
     expect(cacheSafe('claude-sonnet-5-5[1m]')).toBe(true)
     expect(cacheSafe('claude-fable-5-1')).toBe(false)
+    expect(cacheSafe('claude-fable-5-2')).toBe(true)
     expect(cacheSafe('claude-opus-4-8')).toBe(false)
     expect(cacheSafe('claude-opus-5')).toBe(false)
   })
@@ -689,8 +690,39 @@ describe('helpers', () => {
 
 describe('follow-ups', () => {
   test('isFollowUp: short go-aheads yes, real requests no', () => {
-    for (const t of ['go', 'ok', ' yes ', 'ok go', 'continue']) expect(isFollowUp(t)).toBe(true)
+    for (const t of ['go', 'ok', ' yes ', 'ok go', 'continue', 'OK!']) expect(isFollowUp(t)).toBe(true)
     for (const t of ['', 'rename x to count in utils', 'go through my whole drive']) expect(isFollowUp(t)).toBe(false)
+  })
+
+  test('isFollowUp in Japanese goes by the word list, not by length', () => {
+    for (const t of ['はい', 'うん', '続けて', 'お願いします', 'はいお願いします', 'うん、続けて。', 'ありがとう']) expect(isFollowUp(t)).toBe(true)
+    // Short requests: 12 characters or fewer, and still work for the judge.
+    for (const t of ['テスト直して', 'git status見せて', '型注釈を付けて', 'はい、でもテストも']) expect(isFollowUp(t)).toBe(false)
+  })
+
+  test('isThanks: thanks and nothing else', () => {
+    for (const t of ['ありがとう', 'ありがとう、助かった', 'ありがとうございます！', 'thanks!', 'Thank you', '助かった笑']) expect(isThanks(t)).toBe(true)
+    for (const t of ['ok', 'はい', 'ありがとう、次はテストも', 'thanks, now add a test']) expect(isThanks(t)).toBe(false)
+  })
+
+  test('thanks is low by rule, past the effort before it, and asks no judge', async ($, on) => {
+    engine(on)
+    const asked = judgeSays(on, '{"model":"opus","effort":"xhigh","why":"hard"}')
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'granska hela relayn', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
+    await $.prompt.submit({ text: 'ありがとう、助かった', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
+    expect(asked.length).toBe(1)
+    expect(sent.map(s => s.effort)).toEqual(['xhigh', 'low'])
+  })
+
+  test('a short Japanese request goes to the judge', async ($, on) => {
+    engine(on)
+    const asked = judgeSays(on, '{"model":"opus","effort":"high","why":"x"}')
+    await $.prompt.submit({ text: 'granska hela relayn', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: 'テスト直して', wait: false, origin: { kind: 'composer' } })
+    expect(asked.length).toBe(2)
   })
 
   test('"go" after a judged prompt keeps its effort and asks no judge', async ($, on) => {
@@ -1132,14 +1164,15 @@ describe('judge choice (plugin settings)', () => {
   const chat = (content: string) =>
     JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 300, completion_tokens: 20 } })
 
-  test('readConfig: an unknown or empty judge is auto, values are trimmed', () => {
-    expect(readConfig(undefined).judge).toBe('auto')
-    expect(readConfig({ judge: 'gpt' }).judge).toBe('auto')
-    // The Custom judge is gone: a saved 'custom' reads as auto.
-    expect(readConfig({ judge: 'custom' }).judge).toBe('auto')
+  test('readConfig: an unknown or empty judge is haiku, values are trimmed', () => {
+    expect(readConfig(undefined).judge).toBe('haiku')
+    expect(readConfig({ judge: 'gpt' }).judge).toBe('haiku')
+    // The Custom judge is gone: a saved 'custom' reads as haiku.
+    expect(readConfig({ judge: 'custom' }).judge).toBe('haiku')
     expect(readConfig({ judge: ' jev ' }).judge).toBe('jev')
+    expect(readConfig({ judge: 'auto' }).judge).toBe('auto')
     expect(readConfig({})).toEqual({
-      judge: 'auto',
+      judge: 'haiku',
       typesafeKey: '',
       handoffSkill: '',
       handoffAfter: 'continue',
@@ -1149,8 +1182,8 @@ describe('judge choice (plugin settings)', () => {
       hide: ['reason'],
       swampAt: 70,
       layout: 'default',
-      compactWith: 'haiku',
-      handoffButton: 'advised',
+      compactWith: 'session',
+      handoffButton: 'always',
       modelAuto: 'off',
       helpers: 'off',
       theme: 'violet',
@@ -1244,7 +1277,7 @@ describe('model-aware effort', () => {
     expect(seen[0].system).toContain('Opus at medium does about what Sonnet does at high')
   })
 
-  test('Jev gets the model in use and the same rule', async ($, on) => {
+  test('Jev gets the model in use and the same rule', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' }, 'claude-opus-5-5')
     mock.clock(on)
     const bodies: Record<string, any>[] = []
@@ -1476,7 +1509,7 @@ describe('judge failures are said', () => {
     expect(judgeFailure('Jev', 'timeout')).toContain('did not answer')
   })
 
-  test('Jev out of credits: the person is told once, and Haiku judges', async ($, on) => {
+  test('Jev out of credits: the person is told once, and Haiku judges', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' })
     mock.clock(on)
     const asked = judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
@@ -1620,7 +1653,7 @@ describe('compaction by Haiku', () => {
     expect(text).toContain('[3000 more characters]')
   })
 
-  test('Haiku 5.5 writes the summary, with the note typed after /compact; Claude Code does not compact', async ($, on) => {
+  test('Haiku 5.5 writes the summary, with the note typed after /compact; Claude Code does not compact', { options: { compactWith: 'haiku' } } as never, async ($, on) => {
     engine(on, {}, 'claude-opus-5-5', said as never)
     const ran = core(on)
     const asked: { model: string; prompt: string }[] = []
@@ -1635,7 +1668,7 @@ describe('compaction by Haiku', () => {
     expect(out.messages?.[0].text).toContain('rename userId across the app')
   })
 
-  test('when Haiku fails, Claude Code compacts as usual and a toast says why', async ($, on) => {
+  test('when Haiku fails, Claude Code compacts as usual and a toast says why', { options: { compactWith: 'haiku' } } as never, async ($, on) => {
     engine(on)
     const ran = core(on)
     const toasts: string[] = []
@@ -2395,7 +2428,7 @@ describe('settings panel', () => {
     const band = await $.ui.mount(DESK_BAND)
     await band.press({ key: 'dash-settings' })
     await band.press({ key: 'settings-card-judge' })
-    await band.select({ key: 'settings-judge-pick', value: 'jev' })
+    await band.select({ key: 'settings-judge-pick', value: 'auto' })
     await band.press({ key: 'settings-judge-test' })
     const result = async () => (await band.findAll({ type: 'Text' })).map(t => t.text).find(t => /^[✓✗]/.test(t))
     expect(await result()).toContain('✓ Jev answered: low in')
@@ -3092,12 +3125,13 @@ describe('dashboard', () => {
   })
 
   test('readConfig keeps handoffButton to advised or always', () => {
-    expect(readConfig({}).handoffButton).toBe('advised')
-    expect(readConfig({ handoffButton: 'always' }).handoffButton).toBe('always')
-    expect(readConfig({ handoffButton: 'sometimes' }).handoffButton).toBe('advised')
+    // always by default: the advised button asks Haiku every few messages.
+    expect(readConfig({}).handoffButton).toBe('always')
+    expect(readConfig({ handoffButton: 'advised' }).handoffButton).toBe('advised')
+    expect(readConfig({ handoffButton: 'sometimes' }).handoffButton).toBe('always')
   })
 
-  test('one button: Compact until the Haiku check says a handoff would suit; then Handoff, lit, with the reason', DASH, async ($, on) => {
+  test('one button: Compact until the Haiku check says a handoff would suit; then Handoff, lit, with the reason', { options: { layout: 'default', handoffButton: 'advised' } } as never, async ($, on) => {
     engine(on)
     recordSteps(on)
     const mocked = mock.clock(on)
@@ -3298,7 +3332,7 @@ describe('a message typed while a turn runs', () => {
     }
   }
 
-  test('a lower verdict never lowers the running turn; it takes the next one', async ($, on) => {
+  test('no judge mid-turn: the message is judged with the next one, at the start of the next turn', async ($, on) => {
     engine(on)
     const says = { effort: 'high' }
     const asked = judgeSaysNow(on, says)
@@ -3310,29 +3344,55 @@ describe('a message typed while a turn runs', () => {
     await stepOf($, 't1', 0)
     says.effort = 'low'
     await $.prompt.submit({ text: 'also rename the helper you made', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    expect(asked.length).toBe(1)
     await stepOf($, 't1', 1)
     await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    // "ok" would keep the effort by rule, but a carried message goes to the judge with it.
+    await $.prompt.submit({ text: 'ok', wait: false, origin: { kind: 'composer' } })
     await stepOf($, 't2', 0)
 
     expect(asked.length).toBe(2)
-    // The judge is told the message came in while the task ran.
-    expect(asked[1]).toContain('still working')
+    expect(asked[1]).toContain('also rename the helper you made')
+    expect(asked[1]).toContain('Typed earlier')
     expect(sent.map(s => s.effort)).toEqual(['high', 'high', 'low'])
   })
 
-  test('a higher verdict raises the running turn at once', async ($, on) => {
+  test("a level named mid-turn is not sent mid-turn; it is the next turn's, with no judge", async ($, on) => {
     engine(on)
-    const says = { effort: 'low' }
-    judgeSaysNow(on, says)
+    const asked = judgeSaysNow(on, { effort: 'low' })
     const sent = recordSteps(on)
 
     await $.prompt.submit({ text: 'fix the typo in the readme', wait: false, origin: { kind: 'composer' } })
     await stepOf($, 't1', 0)
-    says.effort = 'high'
-    await $.prompt.submit({ text: 'actually go through every doc and fix them all', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await $.prompt.submit({ text: 'max effort, go through every doc and fix them all', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
     await stepOf($, 't1', 1)
+    await $.prompt.submit({ text: 'now push it', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't2', 0)
 
-    expect(sent.map(s => s.effort)).toEqual(['low', 'high'])
+    expect(asked.length).toBe(1)
+    // The second request goes out as the app sends it: the first one's low carries it.
+    expect(sent.map(s => s.effort)).toEqual(['low', 'high', 'max'])
+  })
+
+  test("only a turn's first request is rewritten, and only when the pick differs from the app's effort", async ($, on) => {
+    engine(on)
+    const says = { effort: 'high' }
+    judgeSaysNow(on, says)
+    const sent = recordSteps(on)
+    const lastRequest = async () => String((await $.command.run({ command: 'effortless', args: 'debug' })).text).split(' | ').find(l => l.startsWith('last request:')) ?? ''
+
+    await $.prompt.submit({ text: 'refactor the whole auth module across the app', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't1', 0)
+    expect(await lastRequest()).toContain('(unchanged)')
+    says.effort = 'low'
+    await $.prompt.submit({ text: 'list the files in hooks', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't2', 0)
+    await stepOf($, 't2', 1)
+    await stepOf($, 't2', 2)
+
+    expect(sent.map(s => s.effort)).toEqual(['high', 'low', 'high', 'high'])
+    // What went out: the later requests ran at the first one's low, and the log says so.
+    expect(await lastRequest()).toContain('sent claude-opus-5-5 at low')
   })
 
   test('Auto switched off or on mid-turn leaves the running turn at its effort', async ($, on) => {
@@ -3503,7 +3563,7 @@ describe('updates', () => {
     expect(await drawn(panel)).toContain('Up to date')
   })
 
-  test('the one button says Compact, opens the compact step, and stays on a narrow bar', DESK, async ($, on) => {
+  test('the one button says Compact, opens the compact step, and stays on a narrow bar', { options: { layout: 'default', handoffButton: 'advised' } } as never, async ($, on) => {
     world(on, { installed: '1.0.1', latest: '1.0.1' })
     await start($)
     await settle()
@@ -3836,7 +3896,7 @@ describe('agent panel', () => {
     expect(sent.map(s => s.effort)).toEqual(['high'])
   })
 
-  test('with Helpers off, a subagent of a judged turn runs at the turn\'s effort, never below medium', async ($, on) => {
+  test('with Helpers off, a subagent of a judged turn goes out at the app\'s effort, never rewritten', async ($, on) => {
     engine(on)
     let verdict = '{"model":"opus","effort":"xhigh","why":"hard"}'
     const asked: string[] = []
@@ -3857,9 +3917,9 @@ describe('agent panel', () => {
     verdict = '{"model":"opus","effort":"low","why":"small"}'
     await $.prompt.submit({ text: 'list the files in hooks', wait: false, origin: { kind: 'composer' } })
     await sub()
-    // No judge call for the subagent itself; it follows the turn, raised to medium at least.
+    // No judge call for the subagent itself, and no rewrite of its effort.
     expect(asked.some(p => p.includes('subagent'))).toBe(false)
-    expect(sent.map(s => s.effort)).toEqual(['xhigh', 'medium'])
+    expect(sent.map(s => s.effort)).toEqual(['medium', 'medium'])
   })
 
   test('the demo map shows the parts touched; a part opens to its files', async ($, on) => {
