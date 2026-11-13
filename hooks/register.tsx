@@ -474,7 +474,8 @@ export function namedEffort(text: string): Effort | undefined {
 // a go-ahead. Words may repeat and run together ("はいお願いします", "ありがとう、助かった"), with punctuation between.
 const ACK_WORDS = ['ok', 'okay', 'k', 'yes', 'y', 'yep', 'yeah', 'sure', 'go', 'go ahead', 'continue', 'next', 'proceed', 'lgtm', 'please',
   'はい', 'うん', 'ええ', 'おけ', 'おk', 'おっけー', '了解', 'りょ', 'りょうかい', '続けて', 'つづけて', '続きを', '続き', '進めて', 'すすめて',
-  'お願いします', 'おねがいします', 'お願い', 'おねがい', 'それで', 'いいよ', 'いいね', 'どうぞ', 'やって', 'よろしく', '頼む', 'たのむ']
+  'お願いします', 'おねがいします', 'お願い', 'おねがい', 'それで', 'いいよ', 'いいね', 'どうぞ', 'やって', 'よろしく', '頼む', 'たのむ',
+  'わかりました', '分かりました', 'わかった', '分かった', 'ください', 'です']
 const THANKS_WORDS = ['thanks', 'thank you', 'thx', 'ty', 'ありがとうございます', 'ありがとうございました', 'ありがとう', 'ありがと',
   'サンキュー', 'さんきゅ', '助かりました', '助かります', '助かった', '助かる', '感謝']
 const wordsOnly = (words: string[]) =>
@@ -2066,8 +2067,8 @@ async function closeSetup($: EngineInterface) {
 
 /** The person picked a judge in the guide: then the judge's key or URL, or the next step. Saved at the end. */
 async function pickJudge($: EngineInterface, choice: 'haiku' | 'jev') {
-  // Haiku is saved as Auto: Jev whenever a TypeSafe key is there, Haiku otherwise and whenever Jev does not answer.
-  await update($, setupDraft, d => ({ ...d, judge: choice === 'haiku' ? 'auto' : choice }))
+  // Haiku is saved as haiku: Jev only on an explicit jev (or auto in the settings), never by a key that happens to be set.
+  await update($, setupDraft, d => ({ ...d, judge: choice }))
   await markSetupDone($)
   if (choice === 'haiku') {
     $.ui.toast('effortless: Haiku 5.5 judges, no key needed. Add a Jev key later for faster answers.')
@@ -3565,7 +3566,7 @@ async function effortRows($: EngineInterface, e: RenderInput<'AbovePrompt'>, opt
     : notAligned
       ? `/effort shows ${EFFORT_LABELS[shownByApp as Effort] ?? shownByApp}`
       : current
-        ? `${current.by === 'manual' ? 'You' : current.by === 'jev' ? 'Jev' : 'Haiku'}: ${current.why}`
+        ? `${current.by === 'manual' || current.by === 'named' ? 'You' : current.by === 'jev' ? 'Jev' : current.by === 'rule' ? 'Rule' : 'Haiku'}: ${current.why}`
         : auto
           ? 'Picks the effort at the next prompt'
           : 'Pick an effort'

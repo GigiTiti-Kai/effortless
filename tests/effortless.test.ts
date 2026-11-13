@@ -695,7 +695,7 @@ describe('follow-ups', () => {
   })
 
   test('isFollowUp in Japanese goes by the word list, not by length', () => {
-    for (const t of ['はい', 'うん', '続けて', 'お願いします', 'はいお願いします', 'うん、続けて。', 'ありがとう']) expect(isFollowUp(t)).toBe(true)
+    for (const t of ['はい', 'うん', '続けて', 'お願いします', 'はいお願いします', 'うん、続けて。', 'ありがとう', '続けてください', '進めてください', '了解です', 'わかりました', 'OKです']) expect(isFollowUp(t)).toBe(true)
     // Short requests: 12 characters or fewer, and still work for the judge.
     for (const t of ['テスト直して', 'git status見せて', '型注釈を付けて', 'はい、でもテストも']) expect(isFollowUp(t)).toBe(false)
   })
