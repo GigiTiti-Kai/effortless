@@ -198,7 +198,7 @@ What this does and does not show:
 
 ## Models
 
-Effort only changes on Opus 5.5, Sonnet 5.5 and Fable 5.2, and only on a turn's first request, when the pick differs from the app's own effort: later requests of a turn run at whatever the first went out with. On Fable 5.1 and older models a change of effort between requests rewrote most of the prompt cache, which costs more than it saves, so Auto pauses there and the footer says `Paused`. Haiku takes no effort setting.
+Effort only changes on Opus 5.5, Sonnet 5.5 and Fable 5.2, and only on a turn's first request, when the pick differs from the app's own effort: later requests of a turn run at whatever the first went out with, until you type a message while the turn runs. The app then goes back to its own effort for the rest of that turn, and the footer, the line under the reply and the log say so. On Fable 5.1 and older models a change of effort between requests rewrote most of the prompt cache, which costs more than it saves, so Auto pauses there and the footer says `Paused`. Haiku takes no effort setting.
 
 ## Split view
 

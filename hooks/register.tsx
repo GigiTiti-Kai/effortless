@@ -520,9 +520,9 @@ export function withCarried(text: string, carried: string): string {
 
 [Typed earlier, while the last task was still running, and not judged then: ${carried}]`
 }
-// Messages typed while a turn ran. A running turn keeps the effort its first request went out with (a later rewrite is
-// never sent), so they are decided at the start of the next turn: with the next message (prompt.submit), or, when one
-// of them runs as a turn of its own and no message starts it, at that turn's first request (turn.step).
+// Messages typed while a turn ran. The running turn's effort is not changed for them (no judge, no rewrite), so they are
+// decided at the start of the next turn: with the next message (prompt.submit), or, when one of them runs as a turn of
+// its own and no message starts it, at that turn's first request (turn.step).
 let carried: string[] = []
 // A message started the coming turn (prompt.submit), so its first request needs no decision of its own.
 let freshTurn = false
@@ -1148,11 +1148,22 @@ let engineEffort: string | undefined
 let pickCarried = false
 // The last main-chat request, for /effortless debug: what the app asked for and what the mod sent instead, if anything.
 let lastRequest: { index: number; appModel: string; appEffort: unknown; model: string; effort: unknown; at: number } | null = null
-// The effort the running turn's first request went out with. Its later requests run at it too, whatever they carry, so
-// the footer and the logs show this, not the pick. Cleared when the turn ends.
+// The effort the running turn's requests go out at: the first one's, which its later requests keep whatever they carry,
+// until a message is typed mid-turn. Then the app goes back to its own effort (measured in the 2.1.323 terminal: the next
+// request went out at the session's, not the turn's), and a request goes out at what it carries. The footer and the
+// logs show this, not the pick. Cleared when the turn ends.
+// shortcut: in a stream-json run the turn's effort was seen to carry on past a typed message too; this then shows the
+// session's. Read the transcript's output_config.effort to be sure.
 let sentNow: Effort | undefined
-// The effort each main-chat turn went out with (null: its request carried none, as on Haiku), by turn id from its first
-// request, and by its duration once it ends: the line under a reply (TurnDuration) gets the turn's duration and no turn
+// A message was typed while this turn ran (prompt.submit with its turn id).
+let typedThisTurn = false
+/** The effort a main-chat request carrying `carried` goes out at (see sentNow). */
+function goesOutAt(index: number, carried: unknown): Effort | undefined {
+  if (index > 0 && sentNow && !typedThisTurn) return sentNow
+  return EFFORTS.includes(carried as Effort) ? (carried as Effort) : undefined
+}
+// The effort each main-chat turn's last request went out at (null: it carried none, as on Haiku), by turn id while it
+// runs, and by its duration once it ends: the line under a reply (TurnDuration) gets the turn's duration and no turn
 // id (2.1.323, measured), and shows its own turn's effort, not the one in use now.
 // shortcut: two turns that took the same millisecond share an entry, the later wins; key by message once the app
 // passes one to TurnDuration.
@@ -3965,7 +3976,10 @@ export const register: Register = (on, options) => {
     if (e.agentId) await agentEnded($, e.agentId, e.reason)
     if (!e.agentId) await setTurnBusy($, false)
     if (!e.agentId && typeof e.durationMs === 'number' && sentByTurn.has(e.turnId)) sentByDuration.set(e.durationMs, sentByTurn.get(e.turnId) ?? null)
-    if (!e.agentId) sentNow = undefined
+    if (!e.agentId) {
+      sentNow = undefined
+      typedThisTurn = false
+    }
     // The newest reply's text: its last block carries the warning card (see AssistantMessage).
     if (!e.agentId && e.reason === 'answer') await update($, lastAnswer, () => e.answer.trim())
     if (!e.agentId && turnCost > 0) await update($, lastTurn, () => ({ cost: turnCost, ms: e.durationMs ?? 0 }))
@@ -4135,7 +4149,7 @@ Saved to ${out}.md and .json` }
     if (e.turnId === undefined) {
       sentNow = undefined
       freshTurn = true
-    }
+    } else typedThisTurn = true
     turnCost = 0
     // A landed handoff's card goes once the next message is sent.
     const card = await read($, handoffCard)
@@ -4282,8 +4296,10 @@ Saved to ${out}.md and .json` }
     const send = async function* (request: typeof e) {
       if (e.agentId === undefined) {
         // A later request goes out at the effort of the turn's first, whatever it carries.
-        if (e.index === 0 || !sentNow) sentNow = EFFORTS.includes(request.effort as Effort) ? (request.effort as Effort) : undefined
-        if (e.index === 0) sentByTurn.set(e.turnId, sentNow ?? null)
+        const out = goesOutAt(e.index, request.effort)
+        if (e.index > 0 && typedThisTurn && out !== sentNow) void proof($, `request ${e.index}: a message was typed mid-turn, so the app sends its own ${out ?? 'none'}`)
+        sentNow = out
+        sentByTurn.set(e.turnId, sentNow ?? null)
         lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: sentNow ?? request.effort, at: Date.now() }
         if (e.index === 0 && request.effort !== e.effort) void proof($, `request ${e.index} (${request.model}): effort ${e.effort ?? 'none'} -> ${request.effort ?? 'none'} sent`)
       }
@@ -4324,16 +4340,17 @@ Saved to ${out}.md and .json` }
         else carried = []
       }
       freshTurn = false
+      typedThisTurn = false
     }
     // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort (on the first
-    // request only, like any effort change: the later ones run at it).
+    // request only, like any effort change).
     if (e.agentId === undefined && routed && (await read($, isAuto))) {
       const to = MODELS.find(m => m.key === routed)!.id
       const picked = await read($, pick)
       const effort = e.index === 0 ? (picked?.effort ?? e.effort) : e.effort
-      // The same effort /effortless debug reports for this request (lastRequest): the turn's, from its first request.
+      // The same effort /effortless debug reports for this request (lastRequest, see sentNow).
       // shortcut: what a cheaper model is sent on a later request is not measured; check its transcript to be sure.
-      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${e.index === 0 ? effort : (sentNow ?? effort)}`)
+      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${goesOutAt(e.index, effort) ?? effort ?? 'none'}`)
       const result = yield* send({ ...e, model: to, effort })
       if (picked && picked.by !== 'manual' && result.usage) await tally($, picked.effort, result.usage)
       return result
@@ -4366,7 +4383,8 @@ Saved to ${out}.md and .json` }
       return yield* send({ ...e, effort })
     }
     // Only a turn's first request carries a change: later ones run at whatever it went out with (measured on Fable 5.2,
-    // 0 of 20 later rewrites were sent). A pick equal to the app's own effort needs no rewrite at all.
+    // 0 of 20 later rewrites were sent), until a message is typed mid-turn (see sentNow). A pick equal to the app's own
+    // effort needs no rewrite at all.
     const rewrite = e.index === 0 && p.effort !== e.effort
     const result = yield* send(rewrite ? { ...e, effort: p.effort } : e)
     // Only requests Auto steered count, at the effort that went out.
@@ -4571,7 +4589,7 @@ Saved to ${out}.md and .json` }
     if (config.hide.includes('line')) return next(e)
     const { Box, Text } = themedEls($.ui.resolve(e))
     const v = await snap($)
-    // The effort this reply's turn went out with. A turn from before the plugin (re)loaded has no record, and the
+    // The effort this reply's turn last went out at. A turn from before the plugin (re)loaded has no record, and the
     // effort in use now may differ from the one it was sent at, so none is shown for it.
     const id = (e.props as { turnId?: string }).turnId
     const sentThen = id !== undefined && sentByTurn.has(id) ? sentByTurn.get(id) : sentByDuration.get(e.props.durationMs)

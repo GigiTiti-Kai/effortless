@@ -3397,7 +3397,7 @@ describe('a message typed while a turn runs', () => {
     expect(sent.map(s => s.effort)).toEqual(['high', 'high', 'low'])
   })
 
-  test("a level named mid-turn is not sent mid-turn; it is the next turn's, with no judge", async ($, on) => {
+  test("a level named mid-turn is not rewritten mid-turn; it is the next turn's, with no judge", async ($, on) => {
     engine(on)
     const asked = judgeSaysNow(on, { effort: 'low' })
     const sent = recordSteps(on)
@@ -3410,8 +3410,49 @@ describe('a message typed while a turn runs', () => {
     await stepOf($, 't2', 0)
 
     expect(asked.length).toBe(1)
-    // The second request goes out as the app sends it: the first one's low carries it.
+    // The second request goes out as the app sends it, not rewritten: after a typed message that is its own effort.
     expect(sent.map(s => s.effort)).toEqual(['low', 'high', 'max'])
+  })
+
+  test('after a message typed mid-turn the app\'s own effort is what the log, debug, footer and the reply line show', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' })
+    judgeSaysNow(on, { effort: 'low' })
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    // What each request was sent with, answered with usage so the log writes its response lines.
+    const sent: { effort: unknown }[] = []
+    on('turn.step', async function* (_$, e) {
+      sent.push({ effort: e.effort })
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE } as never
+    })
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (index: number) => {
+      for await (const _ of $.turn.step({ turnId: 't1', index, model: 'claude-opus-5-5', effort: 'low', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const lastRequest = async () => String((await $.command.run({ command: 'effortless', args: 'debug' })).text).split(' | ').find(l => l.startsWith('last request:')) ?? ''
+
+    await $.prompt.submit({ text: 'Use high effort. Run the tests.', wait: false, origin: { kind: 'composer' } })
+    await at(0)
+    await at(1)
+    expect(await lastRequest()).toContain('at high')
+    await $.prompt.submit({ text: 'thanks', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await at(2)
+    // Not rewritten back to high: the app's low goes out, and that is what is recorded.
+    expect(sent.map(s => s.effort)).toEqual(['high', 'low', 'low'])
+    expect(await lastRequest()).toContain('sent claude-opus-5-5 at low')
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).toContain('response 1 at high')
+    expect(log).toContain('request 2: a message was typed mid-turn, so the app sends its own low')
+    expect(log).toContain('response 2 at low')
+    await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 4321, isAborted: false, reason: 'answer' } as never)
+    const line = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { word: 'Worked', durationMs: 4321, isExpanded: false } } as never)
+    expect(await drawn(line)).toContain('✦ Low')
+    await line.unmount()
   })
 
   test('a message typed mid-turn that runs as its own turn is decided at that turn\'s first request, and only there', async ($, on) => {
