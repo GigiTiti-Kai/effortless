@@ -2823,6 +2823,33 @@ describe('dashboard', () => {
     expect(debug).toContain('sent claude-sonnet-5-5 at high')
   })
 
+  // No options: the manifest's defaults, as after `claude plugin install` with no --config (docs/fork/install.md).
+  test('the cheaper model is off by default: a verdict for a cheaper model never routes, and only request 0 changes effort', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    let verdict = '{"model":"haiku","effort":"low","why":"simple question"}'
+    on('model.complete', () => ({ value: { isAnswered: true as const, text: verdict, usage: USAGE } }))
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    const sent = recordSteps(on)
+    for (const [turnId, text] of [['d1', 'what is the folder called?'], ['d2', 'explain this implementation']] as const) {
+      await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+      for (const index of [0, 1, 2]) {
+        for await (const _ of $.turn.step({ turnId, index, model: 'claude-fable-5-2', effort: 'medium', messageCount: 1 })) {
+          // drain
+        }
+      }
+      verdict = '{"model":"sonnet","effort":"high","why":"work"}'
+    }
+    expect(sent.map(s => s.model)).toEqual(Array(6).fill('claude-fable-5-2'))
+    expect(sent.map(s => s.effort)).toEqual(['low', 'medium', 'medium', 'high', 'medium', 'medium'])
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).not.toMatch(/runs on|-> claude-(haiku|sonnet)/)
+    expect(String((await $.command.run({ command: 'effortless', args: 'debug' })).text)).toContain("model: always the chat's")
+  })
+
   test('looksLikeRedo: a correction after a cheaper answer, not a thank-you or a new task', () => {
     for (const yes of ["no, that's wrong", 'Nope. still fails on line 3', 'wrong, it is the other file', "that doesn't work", 'still broken', 'try again please', 'funkar inte', 'fel, det ska vara src', 'inte rätt', "it still doesn't compile"])
       expect(looksLikeRedo(yes)).toBe(true)
