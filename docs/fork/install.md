@@ -213,7 +213,7 @@ weighted cost in all: 553722, per typed prompt: 27686
 | --- | --- | --- |
 | `claude plugin validate .` が `effortless.updateCheck is not declared` で失敗する | ならない。インストールも読み込みも通る | 上流 `88296b5` からある。隔離した環境で、インストール・チャットの起動・記録の書き込みまで通った |
 | `claude plugin test .` で61件が落ちる（290件中） | ならない。落ちるのは描画のテストや textless など、effort の判断と関係しないもの | 変更前（e5c590d）から同じ名前のテストが落ちている。chess の「2秒以内」は時間で通ったり落ちたりする |
-| `tsc` で型エラーが出る（hooks 84件、tests 112件） | ならない。動作には関係しない | hooks の84件は変更前と同じ。2.1.325 の型定義との差 |
+| `tsc` で型エラーが出る（hooks 84件、tests 114件） | ならない。動作には関係しない | hooks の84件は変更前と同じ。2.1.325 の型定義との差 |
 
 ## 問い合わせ先
 
