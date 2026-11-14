@@ -50,6 +50,9 @@ The cheaper model is switched on in Settings → Model; compaction is switched i
 
 ## Install
 
+> This is the GigiTiti-Kai fork. The commands below install upstream HeyCubit's release, which does not have this
+> fork's effort changes. To try the fork, follow [docs/fork/install.md](docs/fork/install.md) instead.
+
 Two ways. Both take a minute and need no terminal.
 
 **1. Ask Claude** (easiest). Paste this into Claude Code and press Enter:
@@ -127,8 +130,8 @@ Haiku also picks the effort, unless you add Jev, TypeSafe's faster judge (about 
 
 | Setting | What it does |
 |---|---|
-| `auto` (default) | Haiku, and Jev too when a [TypeSafe](https://typesafe.ai) key is set in the settings or `TYPESAFE_API_KEY` |
-| `haiku` | Haiku only, a key is never used |
+| `auto` | Haiku, and Jev too when a [TypeSafe](https://typesafe.ai) key is set in the settings or `TYPESAFE_API_KEY` |
+| `haiku` (default) | Haiku only, a key is never used |
 | `jev` | Haiku and Jev, and the key may also come from `~/.config/jev/.env` |
 
 A key set with `/plugin configure` is kept in Claude Code's secure storage. A key pasted in the setup guide or the Judge card is written in plain text to `~/.config/jev/.env` (the file the jev skills read), never to a file of this repo. If Jev fails or takes longer than 3 seconds, Haiku judges that prompt and effortless tells you why once per session (out of credits, key rejected, no answer).

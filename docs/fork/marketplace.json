@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "effortless-fork",
+  "description": "effortless from the GigiTiti-Kai fork (effort switching 2a). For the trial in docs/fork/install.md, not the upstream release.",
+  "owner": {
+    "name": "GigiTiti-Kai",
+    "url": "https://github.com/GigiTiti-Kai"
+  },
+  "plugins": [
+    {
+      "name": "effortless",
+      "description": "Sets the reasoning effort for every prompt automatically (fork build).",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/GigiTiti-Kai/effortless.git",
+        "ref": "main"
+      },
+      "category": "productivity"
+    }
+  ]
+}
