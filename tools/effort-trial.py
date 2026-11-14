@@ -37,7 +37,8 @@ def scan(root, since, until):
                     except ValueError:
                         continue
                     day = str(d.get('timestamp', ''))[:10]
-                    if d.get('type') == 'api-request' and since <= day <= until:
+                    # claude -p runs (querySource sdk) are scripts, not the person's chats: left out.
+                    if d.get('type') == 'api-request' and since <= day <= until and d.get('querySource') != 'sdk':
                         p = d.get('params') or {}
                         sent[d.get('id')] = (p.get('model', '?'), (p.get('output_config') or {}).get('effort') or 'none')
                         if turns:
@@ -46,9 +47,10 @@ def scan(root, since, until):
                         usage.setdefault(d['requestRef'], (d.get('message') or {}).get('usage') or {})
                     elif (who == 'main' and d.get('type') == 'user' and since <= day <= until
                           and (d.get('origin') or {}).get('kind') == 'human'):
-                        # typed: at the prompt between turns; queued: typed while a turn ran.
-                        prompts[d.get('promptSource') or 'typed'] += 1
-                        if d.get('promptSource') != 'queued':
+                        # typed (or a suggestion accepted): at the prompt between turns; queued: typed while a turn ran.
+                        source = 'queued' if d.get('promptSource') == 'queued' else 'typed'
+                        prompts[source] += 1
+                        if source == 'typed':
                             turns.append([])
             # A turn whose later requests went out at another effort than its first: effortless's pick did not hold.
             prompts['turns'] += sum(1 for t in turns if len(t) > 1)
@@ -89,6 +91,8 @@ def self_test():
             {'type': 'assistant', 'requestRef': 'r1', 'message': {'usage': {'output_tokens': 10, 'cache_read_input_tokens': 100}}},
             {'type': 'assistant', 'requestRef': 'r1', 'message': {'usage': {'output_tokens': 10, 'cache_read_input_tokens': 100}}},
             {'type': 'api-request', 'id': 'r2', 'timestamp': '2026-11-16T01:00:04Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'high'}}},
+            {'type': 'user', 'timestamp': '2026-11-16T01:00:05Z', 'origin': {'kind': 'human'}, 'promptSource': 'suggestion_accepted', 'message': {'content': 'go on'}},
+            {'type': 'api-request', 'id': 'r3', 'querySource': 'sdk', 'timestamp': '2026-11-16T01:00:06Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'max'}}},
             {'type': 'api-request', 'id': 'r0', 'timestamp': '2026-11-10T01:00:02Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'max'}}},
         ]
         sub = [{'type': 'api-request', 'id': 'a1', 'timestamp': '2026-11-16T01:00:03Z', 'params': {'model': 'claude-haiku-5-5'}}]
@@ -96,7 +100,7 @@ def self_test():
             with open(path, 'w') as f:
                 f.write('\n'.join(json.dumps(x) for x in lines) + '\nnot json\n')
         rows, prompts = scan(root, '2026-11-16', '2026-11-16')
-        assert prompts == {'typed': 1, 'queued': 1, 'turns': 1, 'changed': 1}, prompts
+        assert prompts == {'typed': 2, 'queued': 1, 'turns': 1, 'changed': 1}, prompts
         assert set(rows) == {('main', 'claude-opus-5-5', 'low'), ('main', 'claude-opus-5-5', 'high'), ('subagent', 'claude-haiku-5-5', 'none')}, rows
         low = rows[('main', 'claude-opus-5-5', 'low')]
         assert (low['requests'], low['output_tokens'], low['cost']) == (1, 10, 60), low

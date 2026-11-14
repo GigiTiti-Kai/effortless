@@ -6,7 +6,7 @@ GigiTiti-Kai/effortless の main（effort 自動切替 2a）を、普段使い�
 
 1. README の `HeyCubit/effortless` のコマンドは使わない。上流版が入り、このフォークの変更（2a）は入らない
 2. 入れる前に `settings.json` などをバックアップする（下の「1. バックアップ」）
-3. 試用中に「Update」のカードが出ても押さない。「Later」か ✕ で閉じる（上流の新版を知らせるカードのため）
+3. 試用中に「Update」のカードが出ても押さない。「Later」で閉じる（上流の新版を知らせるカードのため。24時間たつとまた出る）
 4. `/effort` で effort を自分で変えると、Auto が切れ、新しいチャットでも切れたままになる。戻すときは `/effortless auto`
 
 初回は「1. バックアップ」から「4. 入ったことを確かめる」までを順に通して読む。5章以降は必要になったときに開く。
@@ -42,7 +42,7 @@ GigiTiti-Kai/effortless の main（effort 自動切替 2a）を、普段使い�
 
    出てきた SHA を控える。4章で、入ったものと同じかを照らし合わせる。
 
-3. 普段の effort を決めておく。相づち（「ok」「はい」「続けて」）は、判定役を呼ばずにセッションの effort で送られる。いまの `settings.json` は `effortLevel` が `high`、`modelSettings` で Opus 5.5 が `medium`、Fable 5.2 が `xhigh` になっている
+3. 普段の effort を決めておく。相づち（「ok」「はい」「続けて」）は、ふつうは判定役を呼ばずにセッションの effort で送られる（6章）。いまの `settings.json` は `effortLevel` が `high`、`modelSettings` で Opus 5.5 が `medium`、Fable 5.2 が `xhigh` になっている
 
 ## 1. バックアップ
 
@@ -98,6 +98,7 @@ claude plugin install effortless@effortless-fork
 
 - 1つのチャットの最新200行だけが残る。書くたびにファイル全体を上書きする作りのため
 - 同時に開いている複数のチャットは、同じファイルを上書きし合う
+- `/reload-plugins` で mod が読み直されると、それまでの行は消え、次の1行から書き直される
 
 このため、1週間の集計には使わない。集計は5章のとおりトランスクリプトから出す。この記録は、気になる場面の直後に開いて、判定役の判断を確かめる用途に使う。
 
@@ -188,7 +189,7 @@ weighted cost in all: 553722, per typed prompt: 27686
 | 入力 | 送られる effort |
 | --- | --- |
 | 「Use high effort」「max effort」のように水準を名指し | その水準（判定役は呼ばない） |
-| 「ok」「はい」「続けて」などの相づち | セッションの effort（判定役は呼ばない） |
+| 「ok」「はい」「続けて」などの相づち | セッションの effort（判定役は呼ばない）。ただし Claude の直前の返答が質問で終わっていたときは、相づちでも Haiku が決める |
 | 「ありがとう」だけ | low |
 | それ以外 | Haiku が決めた水準（約1秒待つ） |
 
@@ -201,7 +202,7 @@ weighted cost in all: 553722, per typed prompt: 27686
 
 | 場面 | 起きること |
 | --- | --- |
-| Update のカードが出た | 上流 HeyCubit の新しい版の知らせ。押しても `claude plugin update` が「already at the latest version」で終わるので中身は変わらない（CLI で確かめた）。カードには「Installed. Open a new chat…」と出る見込み（コードから読んだ動きで、カードは試していない）。押さずに閉じる |
+| Update のカードが出た | 上流 HeyCubit の新しい版の知らせ。押しても `claude plugin update` が「already at the latest version」で終わるので中身は変わらない（CLI で確かめた）。カードには「Installed. Open a new chat…」と出る見込み（コードから読んだ動きで、カードは試していない）。「Later」で閉じる。24時間後にまた出るので、そのたびに閉じる |
 | `/effort` で自分で変えた | Auto が切れ、以後のチャットでも切れたまま。`/effortless auto` で戻す |
 | subagent の effort | 既定（Helpers off）では書き換えない。アプリの値のまま |
 | subagent の完了の知らせで始まるターン | 直前に選んだ effort で送られる（入力が無いので判定役は呼ばない） |
