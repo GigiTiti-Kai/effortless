@@ -1156,8 +1156,8 @@ let lastRequest: { index: number; appModel: string; appEffort: unknown; model: s
 // shortcut: in a stream-json run the turn's effort was seen to carry on past a typed message too; this then shows the
 // session's. Read the transcript's output_config.effort to be sure.
 let sentNow: Effort | undefined
-// What joined the chat while this turn ran: a typed message (prompt.submit with its turn id) or a skill's text (the Skill
-// tool). After either the app sends its own effort again (a skill: measured in the 2.1.325 terminal, low -> high).
+// What joined the chat while this turn ran: a typed message (prompt.submit with its turn id) or an inline skill's text
+// (the Skill tool; a forked one runs apart and changes nothing, measured). After either the app sends its own effort again (a skill: measured in the 2.1.325 terminal, low -> high).
 let typedThisTurn: false | 'typed' | 'skill' = false
 /** The effort a main-chat request carrying `carried` goes out at (see sentNow). */
 function goesOutAt(index: number, carried: unknown): Effort | undefined {
@@ -4543,7 +4543,9 @@ Saved to ${out}.md and .json` }
     const known = id !== undefined && (await read($, agentsState)).some(a => a.id === id)
     if (id === undefined && e.tool === 'Skill') {
       const result = await next(e)
-      if (!('deny' in result && result.deny) && !result.isError) typedThisTurn = 'skill'
+      // A forked skill (context: fork) runs in a subagent: its text never joins this chat, so the turn's effort holds.
+      const forked = (result.result as { status?: string } | undefined)?.status === 'forked'
+      if (!('deny' in result && result.deny) && !result.isError && !forked) typedThisTurn = 'skill'
       return result
     }
     if (!touch && !known && !(id === undefined && isList)) return next(e)

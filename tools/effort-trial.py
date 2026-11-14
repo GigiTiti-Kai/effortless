@@ -24,11 +24,16 @@ def scan(root, since, until):
     """Totals per (who, model, effort): requests, tokens by kind, weighted cost; and the main chats' typed prompts."""
     rows = collections.defaultdict(lambda: collections.Counter())
     prompts = collections.Counter()
+    # claude -p runs (querySource sdk) are scripts, not the person's chats: left out with their subagents. A session's
+    # own file is walked before its <session>/subagents folder (os.walk goes top-down).
+    scripted = set()
     for folder, _dirs, files in os.walk(root):
-        for name in files:
+        for name in sorted(files):
             if not name.endswith('.jsonl'):
                 continue
-            who = 'subagent' if os.sep + 'subagents' in folder else 'main'
+            who = 'subagent' if os.path.basename(folder) == 'subagents' else 'main'
+            if who == 'subagent' and os.path.basename(os.path.dirname(folder)) in scripted:
+                continue
             sent, usage, turns = {}, {}, []
             with open(os.path.join(folder, name), encoding='utf-8', errors='replace') as f:
                 for line in f:
@@ -37,8 +42,9 @@ def scan(root, since, until):
                     except ValueError:
                         continue
                     day = str(d.get('timestamp', ''))[:10]
-                    # claude -p runs (querySource sdk) are scripts, not the person's chats: left out.
-                    if d.get('type') == 'api-request' and since <= day <= until and d.get('querySource') != 'sdk':
+                    if d.get('type') == 'api-request' and d.get('querySource') == 'sdk':
+                        scripted.add(name[:-len('.jsonl')])
+                    elif d.get('type') == 'api-request' and since <= day <= until:
                         p = d.get('params') or {}
                         sent[d.get('id')] = (p.get('model', '?'), (p.get('output_config') or {}).get('effort') or 'none')
                         if turns:
@@ -82,6 +88,7 @@ def report(rows, prompts):
 def self_test():
     with tempfile.TemporaryDirectory() as root:
         os.makedirs(os.path.join(root, 'p', 's1', 'subagents'))
+        os.makedirs(os.path.join(root, 'p', 's2', 'subagents'))
         main = [
             {'type': 'user', 'timestamp': '2026-11-16T01:00:00Z', 'origin': {'kind': 'human'}, 'promptSource': 'typed', 'message': {'content': 'fix the test'}},
             {'type': 'user', 'timestamp': '2026-11-16T01:00:01Z', 'origin': {'kind': 'human'}, 'promptSource': 'queued', 'message': {'content': 'thanks'}},
@@ -92,11 +99,15 @@ def self_test():
             {'type': 'assistant', 'requestRef': 'r1', 'message': {'usage': {'output_tokens': 10, 'cache_read_input_tokens': 100}}},
             {'type': 'api-request', 'id': 'r2', 'timestamp': '2026-11-16T01:00:04Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'high'}}},
             {'type': 'user', 'timestamp': '2026-11-16T01:00:05Z', 'origin': {'kind': 'human'}, 'promptSource': 'suggestion_accepted', 'message': {'content': 'go on'}},
-            {'type': 'api-request', 'id': 'r3', 'querySource': 'sdk', 'timestamp': '2026-11-16T01:00:06Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'max'}}},
             {'type': 'api-request', 'id': 'r0', 'timestamp': '2026-11-10T01:00:02Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'max'}}},
         ]
         sub = [{'type': 'api-request', 'id': 'a1', 'timestamp': '2026-11-16T01:00:03Z', 'params': {'model': 'claude-haiku-5-5'}}]
-        for path, lines in ((os.path.join(root, 'p', 's1.jsonl'), main), (os.path.join(root, 'p', 's1', 'subagents', 'a.jsonl'), sub)):
+        # A claude -p session and the subagent it started: both left out.
+        script = [{'type': 'api-request', 'id': 'r3', 'querySource': 'sdk', 'timestamp': '2026-11-16T01:00:06Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'max'}}}]
+        script_sub = [{'type': 'api-request', 'id': 'a2', 'querySource': 'agent:builtin:general-purpose', 'timestamp': '2026-11-16T01:00:07Z', 'params': {'model': 'claude-sonnet-5-5', 'output_config': {'effort': 'high'}}},
+                      {'type': 'assistant', 'requestRef': 'a2', 'message': {'usage': {'output_tokens': 1000}}}]
+        for path, lines in ((os.path.join(root, 'p', 's1.jsonl'), main), (os.path.join(root, 'p', 's1', 'subagents', 'a.jsonl'), sub),
+                            (os.path.join(root, 'p', 's2.jsonl'), script), (os.path.join(root, 'p', 's2', 'subagents', 'b.jsonl'), script_sub)):
             with open(path, 'w') as f:
                 f.write('\n'.join(json.dumps(x) for x in lines) + '\nnot json\n')
         rows, prompts = scan(root, '2026-11-16', '2026-11-16')

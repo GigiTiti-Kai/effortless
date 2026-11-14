@@ -3527,6 +3527,35 @@ describe('a message typed while a turn runs', () => {
     expect(await lastRequest()).toContain('sent claude-fable-5-2 at low')
   })
 
+  test('a forked skill (context: fork) leaves the turn at its effort: the first request\'s is what is recorded', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    on('turn.step', async function* (_$, e) {
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE } as never
+    })
+    // The Skill tool's output for a skill run in a subagent (2.1.325's types).
+    on('tool.call', () => ({ result: { success: true, commandName: 'fork-probe', status: 'forked', agentId: 'a1', result: 'launched', background: true }, isError: false }) as never)
+    const at = async (index: number) => {
+      for await (const _ of $.turn.step({ turnId: 'f1', index, model: 'claude-fable-5-2', effort: 'high', messageCount: 1 })) {
+        // drain
+      }
+    }
+    await $.prompt.submit({ text: 'Use low effort. Run the fork skill.', wait: false, origin: { kind: 'composer' } })
+    await at(0)
+    await $.tool.call({ tool: 'Skill', skill: 'fork-probe' } as never)
+    await at(1)
+    // Measured on 2.1.325: after a forked skill the app keeps sending the turn's low.
+    const debug = String((await $.command.run({ command: 'effortless', args: 'debug' })).text)
+    expect(debug).toContain('sent claude-fable-5-2 at low')
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).toContain('response 1 at low')
+    expect(log).not.toContain('a skill was loaded mid-turn')
+  })
+
   test('the terminal rows show the last effort sent after the turn ends, and a pick made between turns once made', async ($, on) => {
     engine(on, {}, 'claude-fable-5-2')
     mock.clock(on)
