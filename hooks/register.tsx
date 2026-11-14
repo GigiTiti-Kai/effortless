@@ -1149,15 +1149,16 @@ let pickCarried = false
 // The last main-chat request, for /effortless debug: what the app asked for and what the mod sent instead, if anything.
 let lastRequest: { index: number; appModel: string; appEffort: unknown; model: string; effort: unknown; at: number } | null = null
 // The effort the running turn's requests go out at: the first one's, which its later requests keep whatever they carry,
-// until a message is typed mid-turn. Then the app goes back to its own effort (measured in the 2.1.323 terminal: the next
-// request went out at the session's, not the turn's), and a request goes out at what it carries. The footer and the
+// until a message is typed or a skill is loaded mid-turn. Then the app goes back to its own effort (measured in the 2.1.323
+// terminal: the next request went out at the session's, not the turn's), and a request goes out at what it carries. The footer and the
 // logs show this, not the pick. It stays after the turn ends, and is cleared by the next message or by a new pick made
 // between turns (choose), which the footer then shows.
 // shortcut: in a stream-json run the turn's effort was seen to carry on past a typed message too; this then shows the
 // session's. Read the transcript's output_config.effort to be sure.
 let sentNow: Effort | undefined
-// A message was typed while this turn ran (prompt.submit with its turn id).
-let typedThisTurn = false
+// What joined the chat while this turn ran: a typed message (prompt.submit with its turn id) or a skill's text (the Skill
+// tool). After either the app sends its own effort again (a skill: measured in the 2.1.325 terminal, low -> high).
+let typedThisTurn: false | 'typed' | 'skill' = false
 /** The effort a main-chat request carrying `carried` goes out at (see sentNow). */
 function goesOutAt(index: number, carried: unknown): Effort | undefined {
   if (index > 0 && sentNow && !typedThisTurn) return sentNow
@@ -4151,7 +4152,7 @@ Saved to ${out}.md and .json` }
     if (e.turnId === undefined) {
       sentNow = undefined
       freshTurn = true
-    } else typedThisTurn = true
+    } else typedThisTurn = 'typed'
     turnCost = 0
     // A landed handoff's card goes once the next message is sent.
     const card = await read($, handoffCard)
@@ -4299,7 +4300,7 @@ Saved to ${out}.md and .json` }
       if (e.agentId === undefined) {
         // A later request goes out at the effort of the turn's first, whatever it carries.
         const out = goesOutAt(e.index, request.effort)
-        if (e.index > 0 && typedThisTurn && out !== sentNow) void proof($, `request ${e.index}: a message was typed mid-turn, so the app sends its own ${out ?? 'none'}`)
+        if (e.index > 0 && typedThisTurn && out !== sentNow) void proof($, `request ${e.index}: ${typedThisTurn === 'skill' ? 'a skill was loaded' : 'a message was typed'} mid-turn, so the app sends its own ${out ?? 'none'}`)
         sentNow = out
         sentByTurn.set(e.turnId, sentNow ?? null)
         lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: sentNow ?? request.effort, at: Date.now() }
@@ -4385,7 +4386,7 @@ Saved to ${out}.md and .json` }
       return yield* send({ ...e, effort })
     }
     // Only a turn's first request carries a change: later ones run at whatever it went out with (measured on Fable 5.2,
-    // 0 of 20 later rewrites were sent), until a message is typed mid-turn (see sentNow). A pick equal to the app's own
+    // 0 of 20 later rewrites were sent), until a message is typed or a skill is loaded mid-turn (see sentNow). A pick equal to the app's own
     // effort needs no rewrite at all.
     const rewrite = e.index === 0 && p.effort !== e.effort
     const result = yield* send(rewrite ? { ...e, effort: p.effort } : e)
@@ -4540,6 +4541,11 @@ Saved to ${out}.md and .json` }
     const touch = touchOf(e.tool, input)
     const isList = e.tool === 'TodoWrite' || e.tool === 'TaskCreate' || e.tool === 'TaskUpdate'
     const known = id !== undefined && (await read($, agentsState)).some(a => a.id === id)
+    if (id === undefined && e.tool === 'Skill') {
+      const result = await next(e)
+      if (!('deny' in result && result.deny) && !result.isError) typedThisTurn = 'skill'
+      return result
+    }
     if (!touch && !known && !(id === undefined && isList)) return next(e)
     if (known && id !== undefined) {
       const now = await $.clock.now()

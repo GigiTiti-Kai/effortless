@@ -3488,6 +3488,45 @@ describe('a message typed while a turn runs', () => {
     await Promise.all([line.unmount(), footer.unmount()])
   })
 
+  test('after a skill is loaded mid-turn the app\'s own effort is what goes out and what is recorded', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    const sent: { effort: unknown }[] = []
+    on('turn.step', async function* (_$, e) {
+      sent.push({ effort: e.effort })
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE } as never
+    })
+    on('tool.call', () => ({ result: 'Launching skill', isError: false }) as never)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (turnId: string, index: number) => {
+      for await (const _ of $.turn.step({ turnId, index, model: 'claude-fable-5-2', effort: 'high', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const lastRequest = async () => String((await $.command.run({ command: 'effortless', args: 'debug' })).text).split(' | ').find(l => l.startsWith('last request:')) ?? ''
+
+    await $.prompt.submit({ text: 'Use low effort. Load the skill, then run the tests.', wait: false, origin: { kind: 'composer' } })
+    await at('s1', 0)
+    await $.tool.call({ tool: 'Skill', skill: 'superpowers:using-superpowers' } as never)
+    await at('s1', 1)
+    // Measured on 2.1.325: after the skill's text joins the chat the app sends its own high, so that is recorded.
+    expect(sent.map(s => s.effort)).toEqual(['low', 'high'])
+    expect(await lastRequest()).toContain('sent claude-fable-5-2 at high')
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).toContain('request 1: a skill was loaded mid-turn, so the app sends its own high')
+    expect(log).toContain('response 1 at high')
+    // The next turn starts over: its first request carries the pick again, and a later one keeps it.
+    await $.turn.complete({ turnId: 's1', answer: 'done', durationMs: 1234, isAborted: false, reason: 'answer' } as never)
+    await $.prompt.submit({ text: 'Use low effort. Run the tests again.', wait: false, origin: { kind: 'composer' } })
+    await at('s2', 0)
+    await at('s2', 1)
+    expect(await lastRequest()).toContain('sent claude-fable-5-2 at low')
+  })
+
   test('the terminal rows show the last effort sent after the turn ends, and a pick made between turns once made', async ($, on) => {
     engine(on, {}, 'claude-fable-5-2')
     mock.clock(on)
