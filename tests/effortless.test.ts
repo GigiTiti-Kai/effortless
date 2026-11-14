@@ -2823,6 +2823,33 @@ describe('dashboard', () => {
     expect(debug).toContain('sent claude-sonnet-5-5 at high')
   })
 
+  // No options: the manifest's defaults, as after `claude plugin install` with no --config (docs/fork/install.md).
+  test('the cheaper model is off by default: a verdict for a cheaper model never routes, and only request 0 changes effort', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    let verdict = '{"model":"haiku","effort":"low","why":"simple question"}'
+    on('model.complete', () => ({ value: { isAnswered: true as const, text: verdict, usage: USAGE } }))
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    const sent = recordSteps(on)
+    for (const [turnId, text] of [['d1', 'what is the folder called?'], ['d2', 'explain this implementation']] as const) {
+      await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+      for (const index of [0, 1, 2]) {
+        for await (const _ of $.turn.step({ turnId, index, model: 'claude-fable-5-2', effort: 'medium', messageCount: 1 })) {
+          // drain
+        }
+      }
+      verdict = '{"model":"sonnet","effort":"high","why":"work"}'
+    }
+    expect(sent.map(s => s.model)).toEqual(Array(6).fill('claude-fable-5-2'))
+    expect(sent.map(s => s.effort)).toEqual(['low', 'medium', 'medium', 'high', 'medium', 'medium'])
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).not.toMatch(/runs on|-> claude-(haiku|sonnet)/)
+    expect(String((await $.command.run({ command: 'effortless', args: 'debug' })).text)).toContain("model: always the chat's")
+  })
+
   test('looksLikeRedo: a correction after a cheaper answer, not a thank-you or a new task', () => {
     for (const yes of ["no, that's wrong", 'Nope. still fails on line 3', 'wrong, it is the other file', "that doesn't work", 'still broken', 'try again please', 'funkar inte', 'fel, det ska vara src', 'inte rätt', "it still doesn't compile"])
       expect(looksLikeRedo(yes)).toBe(true)
@@ -3459,6 +3486,74 @@ describe('a message typed while a turn runs', () => {
     await footer.redraw()
     expect(await level()).toBe('Low')
     await Promise.all([line.unmount(), footer.unmount()])
+  })
+
+  test('after a skill is loaded mid-turn the app\'s own effort is what goes out and what is recorded', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    const sent: { effort: unknown }[] = []
+    on('turn.step', async function* (_$, e) {
+      sent.push({ effort: e.effort })
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE } as never
+    })
+    on('tool.call', () => ({ result: 'Launching skill', isError: false }) as never)
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (turnId: string, index: number) => {
+      for await (const _ of $.turn.step({ turnId, index, model: 'claude-fable-5-2', effort: 'high', messageCount: 1 })) {
+        // drain
+      }
+    }
+    const lastRequest = async () => String((await $.command.run({ command: 'effortless', args: 'debug' })).text).split(' | ').find(l => l.startsWith('last request:')) ?? ''
+
+    await $.prompt.submit({ text: 'Use low effort. Load the skill, then run the tests.', wait: false, origin: { kind: 'composer' } })
+    await at('s1', 0)
+    await $.tool.call({ tool: 'Skill', skill: 'superpowers:using-superpowers' } as never)
+    await at('s1', 1)
+    // Measured on 2.1.325: after the skill's text joins the chat the app sends its own high, so that is recorded.
+    expect(sent.map(s => s.effort)).toEqual(['low', 'high'])
+    expect(await lastRequest()).toContain('sent claude-fable-5-2 at high')
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).toContain('request 1: a skill was loaded mid-turn, so the app sends its own high')
+    expect(log).toContain('response 1 at high')
+    // The next turn starts over: its first request carries the pick again, and a later one keeps it.
+    await $.turn.complete({ turnId: 's1', answer: 'done', durationMs: 1234, isAborted: false, reason: 'answer' } as never)
+    await $.prompt.submit({ text: 'Use low effort. Run the tests again.', wait: false, origin: { kind: 'composer' } })
+    await at('s2', 0)
+    await at('s2', 1)
+    expect(await lastRequest()).toContain('sent claude-fable-5-2 at low')
+  })
+
+  test('a forked skill (context: fork) leaves the turn at its effort: the first request\'s is what is recorded', async ($, on) => {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    on('turn.step', async function* (_$, e) {
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE } as never
+    })
+    // The Skill tool's output for a skill run in a subagent (2.1.325's types).
+    on('tool.call', () => ({ result: { success: true, commandName: 'fork-probe', status: 'forked', agentId: 'a1', result: 'launched', background: true }, isError: false }) as never)
+    const at = async (index: number) => {
+      for await (const _ of $.turn.step({ turnId: 'f1', index, model: 'claude-fable-5-2', effort: 'high', messageCount: 1 })) {
+        // drain
+      }
+    }
+    await $.prompt.submit({ text: 'Use low effort. Run the fork skill.', wait: false, origin: { kind: 'composer' } })
+    await at(0)
+    await $.tool.call({ tool: 'Skill', skill: 'fork-probe' } as never)
+    await at(1)
+    // Measured on 2.1.325: after a forked skill the app keeps sending the turn's low.
+    const debug = String((await $.command.run({ command: 'effortless', args: 'debug' })).text)
+    expect(debug).toContain('sent claude-fable-5-2 at low')
+    const log = written['/x/proof.log'] ?? ''
+    expect(log).toContain('response 1 at low')
+    expect(log).not.toContain('a skill was loaded mid-turn')
   })
 
   test('the terminal rows show the last effort sent after the turn ends, and a pick made between turns once made', async ($, on) => {
