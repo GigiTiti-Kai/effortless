@@ -155,7 +155,7 @@ python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tool
 python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tools/effort-trial.py --since 2026-11-15T02:43 --until 2026-11-15T06:59:59
 ```
 
-入れ替えの前から開いていたチャットは、閉じるか `/reload-plugins` するまで前の版で動く。時刻で分けた数字には、この分が後ろ側に混ざる。
+同じ版番号（1.72.0）のまま入れ替えると、開いていたチャットも約2秒で新しい版を読み直す（2026-11-15 の入れ替えで、その後に動いたチャット10個すべての `/home/hadas/.claude/effortless-render-<チャットの先頭8文字>.log` が、入れ替えの2秒後の `session.start` から書き直された。前の時刻から続く log は1つもなかった。隔離した環境でも、開いたままのチャットが1秒後に読み直し、そのあとも判定役 jev が答えた）。時刻で分けた数字に前の版の分はほぼ混ざらない。log が入れ替えより前の時刻から続いているチャットは読み直していないので、`/reload-plugins` で読み直す。
 
 ```bash
 python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tools/effort-trial.py --since 2026-11-09 --until 2026-11-15
