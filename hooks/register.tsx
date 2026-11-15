@@ -696,9 +696,10 @@ export function parseJevAnswer(text: string, current: Pick | null): { model: Mod
   const model = MODELS.find(m => m.key === answers?.model?.choice)?.key ?? current?.model ?? 'sonnet'
   const sure = answers?.effort?.confidence ?? answers?.effort?.probabilities?.[chosen]
   const effort = jevFloor(chosen, current?.effort, answers?.continues_work?.noul, answers?.needs_lookup?.noul)
-  const raised = effort !== chosen ? `, raised from ${chosen}` : ''
-  if (typeof sure !== 'number') return { model, effort, why: raised.slice(2) }
-  return { model, effort, why: `${Math.round(sure * 100)}% sure${raised}`, sure }
+  // A raised level carries no sure: the odds were for Jev's own pick, and the lean (tipped) must not undo the floor.
+  if (effort !== chosen) return { model, effort, why: `raised from ${chosen}` }
+  if (typeof sure !== 'number') return { model, effort, why: '' }
+  return { model, effort, why: `${Math.round(sure * 100)}% sure`, sure }
 }
 
 let askJevFile: EnvAsk | undefined

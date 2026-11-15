@@ -684,7 +684,10 @@ describe('helpers', () => {
       JSON.stringify({ answers: { effort: { choice: effort, confidence: 0.9 }, continues_work: { noul: continues }, needs_lookup: { noul: lookup } } })
     expect(parseJevAnswer(jevReply('low', 0.9), current)?.effort).toBe('low')
     expect(parseJevAnswer(jevReply('low', 0.4), current)?.effort).toBe('low')
-    expect(parseJevAnswer(withNouls('low', 0.8, 0.1), current)).toMatchObject({ effort: 'high', why: '90% sure, raised from low' })
+    const raised = parseJevAnswer(withNouls('low', 0.8, 0.1), current)
+    expect(raised).toMatchObject({ effort: 'high', why: 'raised from low' })
+    // No sure on a raised level, so a lean down (bias -2) cannot undo the floor.
+    expect(tipped(raised!.effort, raised!.sure, -2)).toBe('high')
     expect(parseJevAnswer(withNouls('low', 0.1, 0.8), current)?.effort).toBe('medium')
     expect(parseJevAnswer(withNouls('low', 0.49, 0.49), current)?.effort).toBe('low')
     expect(parseJevAnswer(withNouls('xhigh', 0.9, 0.9), current)?.effort).toBe('xhigh')
