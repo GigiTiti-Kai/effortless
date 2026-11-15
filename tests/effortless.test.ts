@@ -3896,6 +3896,23 @@ describe('phases: a loaded skill sets the level, again after every break', () =>
     expect(r.written['/x/proof.log'] ?? '').toContain('request 1: ToolSearch ran mid-turn, low goes out (re-sent by effortless)')
   })
 
+  test('a turn nobody typed (a subagent\'s notice) runs at the phase, not at a level named the turn before', async ($, on) => {
+    const r = rig($, on)
+    await r.typed('refactor the whole auth module')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 1)
+    await r.done('t1')
+    await r.typed('Use low effort. Just list the files.')
+    await r.at('t2', 0)
+    await r.done('t2')
+    // No prompt.submit: the turn a finished subagent's notice starts.
+    await r.at('notification', 0)
+    await r.at('notification', 1)
+    expect(r.sent).toEqual(['low', 'xhigh', 'low', 'xhigh', 'xhigh'])
+    expect(r.written['/x/proof.log'] ?? '').toContain('turn started with no message: the design phase, xhigh')
+  })
+
   test('on Fable ToolSearch is no break: the log says so, and the level in force goes on', async ($, on) => {
     const r = rig($, on, 'claude-fable-5-2')
     await r.typed('fix the typo')

@@ -149,7 +149,7 @@ python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tool
 
 日付は UTC で、試用した週に合わせて変える。比べるために、入れる前の週でも同じように回す。
 
-日の途中で版を入れ替えたときは、`--since` と `--until` に時刻まで書くと、その時刻で分けられる（UTC、`--until` はその時刻を含む）。
+日の途中で版を入れ替えたときは、`--since` と `--until` に時刻まで書くと、その時刻で分けられる（UTC、`--until` はその時刻を含む）。末尾の `Z` は付けても付けなくてもよい（バックアップの `cutover-utc.txt` の形のまま渡せる）。
 
 ```bash
 python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tools/effort-trial.py --since 2026-11-15T02:43 --until 2026-11-15T06:59:59
@@ -236,7 +236,7 @@ effortless は、選んだ effort をすべてのリクエストに付けて送�
 | Update のカードが出た | 上流 HeyCubit の新しい版の知らせ。押しても `claude plugin update` が「already at the latest version」で終わるので中身は変わらない（CLI で確かめた）。カードには「Installed. Open a new chat…」と出る見込み（コードから読んだ動きで、カードは試していない）。「Later」で閉じる。24時間後にまた出るので、そのたびに閉じる |
 | `/effort` で自分で変えた | Auto が切れ、以後のチャットでも切れたまま。`/effortless auto` で戻す |
 | subagent の effort | 既定（Helpers off）では書き換えない。アプリの値のまま |
-| subagent の完了の知らせで始まるターン | 直前に選んだ effort で送られる（入力が無いので判定役は呼ばない） |
+| subagent の完了の知らせで始まるターン | 段階の中なら段階の水準、そうでなければ直前に選んだ effort で送られる（入力が無いので判定役は呼ばない） |
 | work board のエージェント | user スコープに入れると、エージェントのチャットでも effortless が動き、最初のリクエストの effort を書き換える |
 
 ## 7. 既知の問題（導入の妨げになるか）

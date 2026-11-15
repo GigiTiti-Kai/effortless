@@ -33,7 +33,9 @@ NO_BREAK = 'no break (should stay 0)'
 
 
 def inside(ts, since, until):
-    """Whether a UTC timestamp falls from `since` to `until`, both inclusive, each a day or a longer prefix of one."""
+    """Whether a UTC timestamp falls from `since` to `until`, both inclusive, each a day or a longer prefix of one. A
+    trailing Z (as in cutover-utc.txt) is dropped: "07:10:00.123Z" is within the second "07:10:00Z" names."""
+    since, until = since.rstrip('Z'), until.rstrip('Z')
     return since <= ts[:len(since)] and ts[:len(until)] <= until
 
 
@@ -86,7 +88,8 @@ def scan(root, since, until):
                     elif d.get('type') == 'system' and d.get('subtype') == 'turn_duration':
                         # A turn ended: the next request starts one (a typed prompt, or a subagent's notice), no break.
                         pending, last = None, None
-                    elif d.get('type') == 'user' and isinstance((d.get('message') or {}).get('content'), list):
+                    elif (d.get('type') == 'user' and (d.get('origin') or {}).get('kind') != 'human'
+                          and isinstance((d.get('message') or {}).get('content'), list)):
                         # A failed or refused Skill or ToolSearch call is no break.
                         for block in d['message']['content']:
                             if isinstance(block, dict) and block.get('is_error') and calls.pop(block.get('tool_use_id'), None):
@@ -161,6 +164,8 @@ def self_test():
             {'type': 'system', 'subtype': 'turn_duration', 'timestamp': '2026-11-16T01:00:04Z'},
             {'type': 'api-request', 'id': 'r2d', 'timestamp': '2026-11-16T01:00:04Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'medium'}}},
             {'type': 'user', 'timestamp': '2026-11-16T01:00:05Z', 'origin': {'kind': 'human'}, 'promptSource': 'suggestion_accepted', 'message': {'content': 'go on'}},
+            # A typed prompt with an image: its content is a list, and it is still a typed prompt.
+            {'type': 'user', 'timestamp': '2026-11-16T01:00:05Z', 'origin': {'kind': 'human'}, 'promptSource': 'typed', 'message': {'content': [{'type': 'text', 'text': 'this'}, {'type': 'image'}]}},
             {'type': 'api-request', 'id': 'r0', 'timestamp': '2026-11-10T01:00:02Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'max'}}},
         ]
         sub = [{'type': 'api-request', 'id': 'a1', 'timestamp': '2026-11-16T01:00:03Z', 'params': {'model': 'claude-haiku-5-5'}}]
@@ -173,7 +178,7 @@ def self_test():
             with open(path, 'w') as f:
                 f.write('\n'.join(json.dumps(x) for x in lines) + '\nnot json\n')
         rows, prompts, breaks = scan(root, '2026-11-16', '2026-11-16')
-        assert prompts == {'typed': 2, 'queued': 1, 'turns': 1, 'changed': 1}, prompts
+        assert prompts == {'typed': 3, 'queued': 1, 'turns': 1, 'changed': 1}, prompts
         assert breaks == {'a Skill call': {('claude-opus-5-5', 'low', 'high'): 1}, NO_BREAK: {('claude-opus-5-5', 'high', 'medium'): 1},
                           'a message typed mid-turn': {('claude-opus-5-5', 'medium', 'high'): 1}}, breaks
         assert 'after a Skill call: 1, kept 0, changed: claude-opus-5-5 low->high 1' in report(rows, prompts, breaks)
@@ -183,7 +188,9 @@ def self_test():
         # A cut within the day: from 01:00:03 on, r1 (01:00:02) and the typed prompt at 01:00:00 are out.
         rows, prompts, _ = scan(root, '2026-11-16T01:00:03', '2026-11-16')
         assert set(rows) == {('main', 'claude-opus-5-5', 'high'), ('main', 'claude-opus-5-5', 'medium'), ('subagent', 'claude-haiku-5-5', 'none')}, rows
-        assert prompts['typed'] == 1 and prompts['queued'] == 0, prompts
+        assert prompts['typed'] == 2 and prompts['queued'] == 0, prompts
+        assert inside('2026-11-15T07:10:00.123Z', '2026-11-15T07:10:00Z', '2026-11-15')
+        assert not inside('2026-11-15T07:10:00.123Z', '2026-11-15', '2026-11-15T07:09:59Z')
         assert inside('2026-11-16T23:59:59.9Z', '2026-11-16', '2026-11-16') and not inside('2026-11-16T09:29:59Z', '2026-11-16T09:30', '2026-11-16')
     print('self-test ok')
 

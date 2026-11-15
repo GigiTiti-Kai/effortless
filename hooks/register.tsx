@@ -4477,6 +4477,11 @@ Saved to ${out}.md and .json` }
       if (carried.length && !freshTurn) {
         if ((await read($, isAuto)) && cacheSafe(e.model)) await decideCarried($)
         else carried = []
+      } else if (!freshTurn && phaseNow) {
+        // A turn nobody typed (a subagent's notice, a queued command): in a phase its level runs, not a pick left from
+        // the last turn (a named one, say). pickPhase leaves Haiku, cache-unsafe models and Auto off alone.
+        const at = await pickPhase($, `${phaseNow.name} phase`)
+        if (at) void proof($, `turn started with no message: the ${phaseNow.name} phase, ${at}`)
       }
       freshTurn = false
       // A /name whose skill never loaded is not left armed for a later one.
