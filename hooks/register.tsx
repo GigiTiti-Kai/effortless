@@ -561,6 +561,31 @@ async function pickByRule($: EngineInterface, thanks: boolean, said: string) {
   void proof($, `${thanks ? 'thanks' : 'follow-up'} "${said.slice(0, 50)}": ${effort ?? 'the session effort (not seen yet)'} by rule, no judge`)
 }
 
+/** The phase's level as Auto's pick, within Min, Max and save mode, as a judge's verdict is. Nothing with Auto off. */
+async function pickPhase($: EngineInterface, why: string): Promise<Effort | undefined> {
+  if (!phaseNow || !(await read($, isAuto))) return undefined
+  const inUse = await sessionModel($)
+  const effort = capped(bounded(phaseNow.effort, config.floor, config.ceiling), (await read($, saveUntil)) !== null)
+  await choose($, { model: inUse, effort, why, by: 'phase' })
+  if (routed) routed = null
+  return effort
+}
+
+/** A skill's text joined the main chat: a break. Its own effort: holds the turn; else the table's phase starts, or ends. */
+async function skillJoined($: EngineInterface, skill: string, effort: Effort | null) {
+  breakSince = 'skill'
+  const was = phaseNow
+  phaseNow = effort ? null : (phaseOf(config.phases, skill) ?? null)
+  if (was && was !== phaseNow) void proof($, `skill ${skill}: the ${was.name} phase ends`)
+  if (effort) {
+    skillHold = effort
+    void proof($, `skill ${skill} sets effort ${effort} itself: that level for the rest of this turn`)
+  } else if (phaseNow) {
+    const at = await pickPhase($, `${phaseNow.name} phase (${bareSkill(skill)})`)
+    void proof($, `skill ${skill}: the ${phaseNow.name} phase, ${at ?? 'Auto off, not applied'}`)
+  }
+}
+
 /** Messages typed mid-turn that carry work: go-aheads and thanks carry none, so they never send a message to the judge. */
 export function carriesWork(texts: readonly string[]): string[] {
   return texts.filter(t => !isFollowUp(t))
@@ -571,8 +596,6 @@ async function decideCarried($: EngineInterface) {
   const all = carried
   const texts = carriesWork(all)
   carried = []
-  // Only go-aheads or thanks were typed: the same rules as for a message that starts a turn.
-  if (!texts.length) return pickByRule($, all.every(isThanks), all.join(' '))
   const inUse = await sessionModel($)
   const named = lastNamed(texts)
   if (named) {
@@ -581,6 +604,15 @@ async function decideCarried($: EngineInterface) {
     void proof($, `turn started by a message typed mid-turn: named level ${named}, no judge`)
     return
   }
+  // In a phase its level runs, as for a message that starts a turn.
+  const phased = await pickPhase($, `${phaseNow?.name} phase`)
+  if (phased) {
+    await countPrompt($, inUse !== 'haiku' ? phased : undefined, 'phase', 0, 0)
+    void proof($, `turn started by a message typed mid-turn: the ${phaseNow?.name} phase, ${phased}, no judge`)
+    return
+  }
+  // Only go-aheads or thanks were typed: the same rules as for a message that starts a turn.
+  if (!texts.length) return pickByRule($, all.every(isThanks), all.join(' '))
   const startedAt = Date.now()
   const { verdict, tokens } = await judge($, texts.join('\n'), { model: inUse, effort: (await read($, pick))?.effort ?? 'medium', why: '', by: 'manual' })
   await countPrompt($, inUse !== 'haiku' ? verdict?.effort : undefined, verdict?.by, Date.now() - startedAt, tokens)
@@ -699,6 +731,36 @@ export type JudgeConfig = {
   theme: ThemeName
   /** auto: light when Claude Code's own theme is light. dark and light fix it. */
   appearance: 'auto' | 'dark' | 'light'
+  /** The phase table: a skill loaded (typed or by the Skill tool) puts the chat in its phase, at that level. Empty: no phases. */
+  phases: Phase[]
+}
+
+/** One row of the phase table: its name, its level and the skills that start it. */
+export type Phase = { name: string; effort: Effort; skills: string[] }
+export const DEFAULT_PHASES =
+  'design=xhigh: brainstorming, grill-with-docs, grilling, writing-plans, plan-review-loop; ' +
+  'build=medium: executing-plans, subagent-driven-development, test-driven-development, split-exec; ' +
+  'check=high: requesting-code-review, code-review, verification-before-completion'
+
+/** "design=xhigh: brainstorming, writing-plans; build=medium: …" as rows. A row without a known level is left out; "off" or "" is none. */
+export function parsePhases(text: string): Phase[] {
+  return text.split(';').flatMap(row => {
+    const m = row.match(/^\s*([\w-]+)\s*=\s*(\w+)\s*:(.*)$/)
+    if (!m || !EFFORTS.includes(m[2] as Effort)) return []
+    const skills = m[3].split(',').map(s => bareSkill(s.trim())).filter(Boolean)
+    return skills.length ? [{ name: m[1], effort: m[2] as Effort, skills }] : []
+  })
+}
+
+/** A skill's name without its plugin: "superpowers:brainstorming" and "/brainstorming" are "brainstorming". */
+export function bareSkill(name: string): string {
+  return name.replace(/^\//, '').split(':').pop()!.trim()
+}
+
+/** The phase a skill starts, if the table has it. */
+export function phaseOf(phases: readonly Phase[], skill: string): Phase | undefined {
+  const name = bareSkill(skill)
+  return phases.find(p => p.skills.includes(name))
 }
 
 /** The swamp thresholds the settings offer, in percent of the context window. */
@@ -728,6 +790,7 @@ let config: JudgeConfig = {
   helpers: 'off',
   theme: 'violet',
   appearance: 'auto',
+  phases: parsePhases(DEFAULT_PHASES),
 }
 
 /** The settings as the engine hands them over (defaults filled in), cleaned to the shape the judge reads. */
@@ -753,6 +816,7 @@ export function readConfig(options: unknown): JudgeConfig {
     helpers: str(o.helpers) === 'on' ? 'on' : 'off',
     theme: THEMES.find(t => t === str(o.theme)) ?? 'violet',
     appearance: (['dark', 'light'] as const).find(a => a === str(o.appearance)) ?? 'auto',
+    phases: parsePhases(o.phases === undefined ? DEFAULT_PHASES : str(o.phases)),
     // The judge's line is off until switched on; an empty string saved from the panel means everything shows.
     hide: (o.hide === undefined ? 'reason' : str(o.hide))
       .split(',')
@@ -1148,22 +1212,32 @@ let engineEffort: string | undefined
 let pickCarried = false
 // The last main-chat request, for /effortless debug: what the app asked for and what the mod sent instead, if anything.
 let lastRequest: { index: number; appModel: string; appEffort: unknown; model: string; effort: unknown; at: number } | null = null
-// The effort the running turn's requests go out at: the first one's, which its later requests keep whatever they carry,
-// until a message is typed or a skill is loaded mid-turn. Then the app goes back to its own effort (measured in the 2.1.323
-// terminal: the next request went out at the session's, not the turn's), and a request goes out at what it carries. The footer and the
-// logs show this, not the pick. It stays after the turn ends, and is cleared by the next message or by a new pick made
-// between turns (choose), which the footer then shows.
-// shortcut: in a stream-json run the turn's effort was seen to carry on past a typed message too; this then shows the
-// session's. Read the transcript's output_config.effort to be sure.
+// The effort the running turn's requests go out at. A level is taken only on a turn's first request and on the first
+// request after a break: a message typed mid-turn, an inline skill's text, a ToolSearch call (2.1.325, measured in EFR-4:
+// Sonnet, Opus and Fable for the first two, not Fable for ToolSearch). Between breaks a request keeps the level in force,
+// whatever it carries. At a break the app goes back to its own effort unless the request carries another, so the mod
+// re-sends its pick on every request (one between breaks is ignored, harmlessly). The footer and the logs show this, not
+// the pick. It stays after the turn ends, and is cleared by the next message or by a new pick made between turns (choose).
 let sentNow: Effort | undefined
-// What joined the chat while this turn ran: a typed message (prompt.submit with its turn id) or an inline skill's text
-// (the Skill tool; a forked one runs apart and changes nothing, measured). After either the app sends its own effort again (a skill: measured in the 2.1.325 terminal, low -> high).
-let typedThisTurn: false | 'typed' | 'skill' = false
+// The break since the last main-chat request, if any (see sentNow). A forked skill runs apart and is none (measured).
+let breakSince: false | 'typed' | 'skill' | 'toolsearch' = false
 /** The effort a main-chat request carrying `carried` goes out at (see sentNow). */
-function goesOutAt(index: number, carried: unknown): Effort | undefined {
-  if (index > 0 && sentNow && !typedThisTurn) return sentNow
+function goesOutAt(index: number, carried: unknown, model: string): Effort | undefined {
+  const isBreak = breakSince && !(breakSince === 'toolsearch' && keyOf(model) === 'fable')
+  if (index > 0 && sentNow && !isBreak) return sentNow
   return EFFORTS.includes(carried as Effort) ? (carried as Effort) : undefined
 }
+// The phase of the chat (config.phases): set by a skill the table has, ended by any other inline skill or a new chat.
+let phaseNow: Phase | null = null
+// A skill whose own file sets effort: the app sends that level for the rest of the turn (EFR-3/4, measured), and the
+// mod re-sends it at each break instead of its pick (its author's word wins over the table).
+let skillHold: Effort | null = null
+// A main-chat Skill tool call is loading its skill now (skill.prompt also fires for a skill a subagent loads).
+let mainSkillLoading = false
+// The skill a message typed "/name" runs, until its skill.prompt arrives.
+let typedSkillName: string | null = null
+// What the skill.prompt just seen said, for the Skill tool call that loaded it to act on once it succeeds.
+let loadedSkill: { skill: string; effort: Effort | null } | null = null
 // The effort each main-chat turn's last request went out at (null: it carried none, as on Haiku), by turn id while it
 // runs, and by its duration once it ends: the line under a reply (TurnDuration) gets the turn's duration and no turn
 // id (2.1.323, measured), and shows its own turn's effort, not the one in use now.
@@ -3365,7 +3439,7 @@ async function dashboardBand($: EngineInterface, e: RenderInput<'AbovePrompt'>) 
   const effortNow = effortOf(v, v.modelNow ?? (await sessionModel($)))
   const by = v.current?.by
   const reason = v.current
-    ? `${by === 'manual' || by === 'named' ? 'You' : by === 'jev' ? 'Jev' : by === 'rule' ? 'Rule' : 'Haiku'}: ${v.current.why}`
+    ? `${by === 'manual' || by === 'named' ? 'You' : by === 'jev' ? 'Jev' : by === 'rule' ? 'Rule' : by === 'phase' ? 'Phase' : 'Haiku'}: ${v.current.why}`
     : v.auto
       ? 'Auto picks the effort at the next prompt'
       : 'You pick the effort'
@@ -3648,7 +3722,7 @@ async function effortRows($: EngineInterface, e: RenderInput<'AbovePrompt'>, opt
     : notAligned
       ? `/effort shows ${EFFORT_LABELS[shownByApp as Effort] ?? shownByApp}`
       : current
-        ? `${current.by === 'manual' || current.by === 'named' ? 'You' : current.by === 'jev' ? 'Jev' : current.by === 'rule' ? 'Rule' : 'Haiku'}: ${current.why}`
+        ? `${current.by === 'manual' || current.by === 'named' ? 'You' : current.by === 'jev' ? 'Jev' : current.by === 'rule' ? 'Rule' : current.by === 'phase' ? 'Phase' : 'Haiku'}: ${current.why}`
         : auto
           ? 'Picks the effort at the next prompt'
           : 'Pick an effort'
@@ -3910,6 +3984,9 @@ export const register: Register = (on, options) => {
   })
   on('session.start', async ($, e, next) => {
     sessionStarted = Date.now()
+    // A phase is this chat's: a new one (or /clear) starts with none.
+    phaseNow = null
+    skillHold = null
     // Everything the first draw needs, asked for at once: one after the other they held the start (and with it the
     // band) for a second or more. What the draw does not need runs after, unawaited.
     const [sid, kept, kff, storedAuto, storedAutoModel, storedPick, setupDone] = await Promise.all([
@@ -3982,7 +4059,11 @@ export const register: Register = (on, options) => {
     if (!e.agentId) await setTurnBusy($, false)
     if (!e.agentId && typeof e.durationMs === 'number' && sentByTurn.has(e.turnId)) sentByDuration.set(e.durationMs, sentByTurn.get(e.turnId) ?? null)
     // sentNow stays: until the next message, the footer and the band show the effort the turn last went out at.
-    if (!e.agentId) typedThisTurn = false
+    if (!e.agentId) {
+      breakSince = false
+      // A skill's own effort lasts its turn (measured); the app's own comes back with the next.
+      skillHold = null
+    }
     // The newest reply's text: its last block carries the warning card (see AssistantMessage).
     if (!e.agentId && e.reason === 'answer') await update($, lastAnswer, () => e.answer.trim())
     if (!e.agentId && turnCost > 0) await update($, lastTurn, () => ({ cost: turnCost, ms: e.durationMs ?? 0 }))
@@ -4101,6 +4182,7 @@ export const register: Register = (on, options) => {
           lastRequest
             ? `last request: app asked ${lastRequest.appModel} at ${lastRequest.appEffort ?? 'none'}, sent ${lastRequest.model} at ${lastRequest.effort ?? 'none'}${lastRequest.model === lastRequest.appModel && lastRequest.effort === lastRequest.appEffort ? ' (unchanged)' : ' (changed by effortless)'}, ${ago(lastRequest.at)}`
             : 'last request: none yet',
+          `phase: ${phaseNow ? `${phaseNow.name} (${phaseNow.effort})` : 'none'}${skillHold ? `, a skill holds ${skillHold}` : ''}`,
           `compact with: ${config.compactWith}${lastHaikuCompact ? `, last by Haiku ${ago(lastHaikuCompact)}` : ''}`,
         ].join(' | ') +
           // On its own line, easy to find: the model and effort the last request actually ran on.
@@ -4152,7 +4234,7 @@ Saved to ${out}.md and .json` }
     if (e.turnId === undefined) {
       sentNow = undefined
       freshTurn = true
-    } else typedThisTurn = 'typed'
+    } else breakSince = 'typed'
     turnCost = 0
     // A landed handoff's card goes once the next message is sent.
     const card = await read($, handoffCard)
@@ -4167,7 +4249,13 @@ Saved to ${out}.md and .json` }
     // (/compact, /clear, /model) and effortless's never are. The judge is told what the command is, since its name alone says little.
     const slash = e.text.trim().startsWith('/')
     const skill = slash && byPerson ? await typedSkill($, e.text) : undefined
+    if (e.turnId === undefined) typedSkillName = skill?.name ?? null
     if (!byPerson || (slash && !skill) || (!wantsEffort && !wantsModel)) return next(e)
+    // A typed skill the phase table has: its phase decides when its text loads (skill.prompt), so no judge is asked.
+    if (skill && e.turnId === undefined && wantsEffort && phaseOf(config.phases, skill.name)) {
+      void proof($, `typed /${skill.name}: the phase table decides, no judge`)
+      return next(e)
+    }
     // On a model where an effort change rewrites the cache, Auto waits instead of judging.
     const modelId = await $.session.model()
     await modelIs($, modelId)
@@ -4175,11 +4263,13 @@ Saved to ${out}.md and .json` }
     const said = skill ? `${e.text}
 
 [This is a slash command that runs a skill: ${skill.description || skill.name}. Judge the work the skill will do.]` : e.text
-    // Typed while a turn ran (e.turnId): that turn's effort can no longer change, so no judge is asked now. The message
-    // is carried to the next one and judged with it, at the start of the next turn.
+    // Typed while a turn ran (e.turnId): no judge is asked now. The message is carried to the next one and judged with
+    // it, at the start of the next turn. A level it names runs from the next request on: a typed message is a break.
     if (e.turnId !== undefined) {
       carried.push(withAttachments(said, e.attachments))
-      void proof($, `typed mid-turn: "${e.text.slice(0, 50)}" waits for the next turn, no judge`)
+      const named = wantsEffort ? namedEffort(e.text) : undefined
+      if (named) await choose($, { model: await sessionModel($), effort: named, why: 'you asked for it', by: 'named' })
+      void proof($, `typed mid-turn: "${e.text.slice(0, 50)}" ${named ? `names ${named}, from the next request` : 'waits for the next turn, no judge'}`)
       return next(e)
     }
     const earlier = carriesWork(carried)
@@ -4189,6 +4279,15 @@ Saved to ${out}.md and .json` }
     // A message with an image is never a bare follow-up: "fix this" plus a screenshot is new work; nor is one with
     // messages carried from the last turn that may have steered it (carried go-aheads and thanks were dropped above).
     const bare = wantsEffort && !e.attachments?.length && !slash && !earlier.length
+    // In a phase its level runs, with no judge, unless the message names a level. A typed skill is decided as it loads.
+    if (wantsEffort && phaseNow && !slash && !(namedEffort(e.text) ?? lastNamed(earlier))) {
+      const inUse = await sessionModel($)
+      const at = await pickPhase($, `${phaseNow.name} phase`)
+      await countPrompt($, inUse !== 'haiku' ? at : undefined, 'phase', 0, 0)
+      void proof($, `the ${phaseNow.name} phase: ${at} for "${e.text.slice(0, 50)}", no judge`)
+      $.ui.invalidate('ui.render')
+      return next(e)
+    }
     // Thanks and nothing else: low by rule, within the person's Min and Max. No judge.
     if (bare && isThanks(e.text)) {
       await pickByRule($, true, e.text.trim())
@@ -4298,9 +4397,14 @@ Saved to ${out}.md and .json` }
     // Every main-conversation response, whatever its effort, keeps the cache warm for its lifetime from now.
     const send = async function* (request: typeof e) {
       if (e.agentId === undefined) {
-        // A later request goes out at the effort of the turn's first, whatever it carries.
-        const out = goesOutAt(e.index, request.effort)
-        if (e.index > 0 && typedThisTurn && out !== sentNow) void proof($, `request ${e.index}: ${typedThisTurn === 'skill' ? 'a skill was loaded' : 'a message was typed'} mid-turn, so the app sends its own ${out ?? 'none'}`)
+        // Between breaks a request goes out at the level in force, whatever it carries; after one, at what it carries.
+        const out = goesOutAt(e.index, request.effort, request.model)
+        if (e.index > 0 && breakSince) {
+          const what = breakSince === 'skill' ? 'a skill was loaded' : breakSince === 'typed' ? 'a message was typed' : 'ToolSearch ran'
+          const how = out !== request.effort ? 'no break on this model' : request.effort !== e.effort ? 're-sent by effortless' : "the app's own"
+          void proof($, `request ${e.index}: ${what} mid-turn, ${out ?? 'none'} goes out (${how})`)
+        }
+        breakSince = false
         sentNow = out
         sentByTurn.set(e.turnId, sentNow ?? null)
         lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: sentNow ?? request.effort, at: Date.now() }
@@ -4317,7 +4421,9 @@ Saved to ${out}.md and .json` }
     }
     if (e.agentId === undefined) await setTurnBusy($, true)
     if (e.agentId === undefined) await modelIs($, e.model)
-    if (e.agentId === undefined && typeof e.effort === 'string') {
+    // While a skill's own effort holds the turn, the app's effort is the skill's, not the person's (and it comes back
+    // with the next turn): not a change of theirs.
+    if (e.agentId === undefined && typeof e.effort === 'string' && !skillHold) {
       const seen = e.effort
       const isFirst = engineEffort === undefined
       const isByPerson = !isFirst && seen !== engineEffort
@@ -4343,7 +4449,10 @@ Saved to ${out}.md and .json` }
         else carried = []
       }
       freshTurn = false
-      typedThisTurn = false
+    }
+    // A skill that sets its own effort: that level for the rest of its turn, re-sent at each break instead of the pick.
+    if (e.agentId === undefined && skillHold && typeof e.effort === 'string' && cacheSafe(e.model)) {
+      return yield* send(skillHold !== e.effort ? { ...e, effort: skillHold } : e)
     }
     // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort (on the first
     // request only, like any effort change).
@@ -4353,7 +4462,7 @@ Saved to ${out}.md and .json` }
       const effort = e.index === 0 ? (picked?.effort ?? e.effort) : e.effort
       // The same effort /effortless debug reports for this request (lastRequest, see sentNow).
       // shortcut: what a cheaper model is sent on a later request is not measured; check its transcript to be sure.
-      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${goesOutAt(e.index, effort) ?? effort ?? 'none'}`)
+      void proof($, `request ${e.index}: ${e.model} -> ${to} at ${goesOutAt(e.index, effort, to) ?? effort ?? 'none'}`)
       const result = yield* send({ ...e, model: to, effort })
       if (picked && picked.by !== 'manual' && result.usage) await tally($, picked.effort, result.usage)
       return result
@@ -4385,10 +4494,9 @@ Saved to ${out}.md and .json` }
       if (e.index === 0) void proof($, `subagent ${e.agentId} (${e.model}): effort ${e.effort ?? 'none'} -> ${effort}, the turn's`)
       return yield* send({ ...e, effort })
     }
-    // Only a turn's first request carries a change: later ones run at whatever it went out with (measured on Fable 5.2,
-    // 0 of 20 later rewrites were sent), until a message is typed or a skill is loaded mid-turn (see sentNow). A pick equal to the app's own
-    // effort needs no rewrite at all.
-    const rewrite = e.index === 0 && p.effort !== e.effort
+    // Every request carries the pick: the first of a turn and the first after a break take it, the others keep the level
+    // in force and ignore it (see sentNow). A pick equal to the app's own effort needs no rewrite at all.
+    const rewrite = p.effort !== e.effort
     const result = yield* send(rewrite ? { ...e, effort: p.effort } : e)
     // Only requests Auto steered count, at the effort that went out.
     if (p.by !== 'manual' && result.usage && sentNow) {
@@ -4535,6 +4643,19 @@ Saved to ${out}.md and .json` }
     return result
   })
 
+  // A skill's text, as it is expanded: what its own file says of effort, for the phase table (skillJoined). It also
+  // fires for a skill a subagent loads or has preloaded: only the main chat's Skill call or a typed /name counts.
+  on('skill.prompt', async ($, e, next) => {
+    const own = e.frontmatter?.effort
+    const effort = EFFORTS.includes(own as Effort) ? (own as Effort) : null
+    if (mainSkillLoading) loadedSkill = { skill: e.skill, effort }
+    else if (typedSkillName !== null && bareSkill(typedSkillName) === bareSkill(e.skill)) {
+      typedSkillName = null
+      await skillJoined($, e.skill, effort).catch(() => undefined)
+    }
+    return next(e)
+  })
+
   on('tool.call', async ($, e, next) => {
     const id = e.agentId
     const input = e as unknown as Record<string, unknown>
@@ -4542,10 +4663,27 @@ Saved to ${out}.md and .json` }
     const isList = e.tool === 'TodoWrite' || e.tool === 'TaskCreate' || e.tool === 'TaskUpdate'
     const known = id !== undefined && (await read($, agentsState)).some(a => a.id === id)
     if (id === undefined && e.tool === 'Skill') {
-      const result = await next(e)
+      loadedSkill = null
+      mainSkillLoading = true
+      let result
+      try {
+        result = await next(e)
+      } finally {
+        mainSkillLoading = false
+      }
       // A forked skill (context: fork) runs in a subagent: its text never joins this chat, so the turn's effort holds.
       const forked = (result.result as { status?: string } | undefined)?.status === 'forked'
-      if (!('deny' in result && result.deny) && !result.isError && !forked) typedThisTurn = 'skill'
+      const seen = loadedSkill as { skill: string; effort: Effort | null } | null
+      loadedSkill = null
+      if (!('deny' in result && result.deny) && !result.isError && !forked) {
+        await skillJoined($, seen?.skill ?? String((e as { skill?: unknown }).skill ?? ''), seen?.effort ?? null).catch(() => undefined)
+      }
+      return result
+    }
+    // ToolSearch changes the tools: a break on Sonnet and Opus (EFR-4), where the app goes back to its own effort.
+    if (id === undefined && e.tool === 'ToolSearch') {
+      const result = await next(e)
+      if (!('deny' in result && result.deny) && !result.isError) breakSince = 'toolsearch'
       return result
     }
     if (!touch && !known && !(id === undefined && isList)) return next(e)

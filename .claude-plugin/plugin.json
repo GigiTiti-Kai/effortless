@@ -104,6 +104,12 @@
         "off"
       ]
     },
+    "phases": {
+      "type": "string",
+      "title": "Phases (skill → effort)",
+      "description": "A loaded skill puts the chat in its phase, and every message runs at that level until another skill loads; a level you name in a message wins, and a skill whose own file sets effort: keeps that. Rows: name=level: skill, skill; … Empty or off: no phases, the judge decides.",
+      "default": "design=xhigh: brainstorming, grill-with-docs, grilling, writing-plans, plan-review-loop; build=medium: executing-plans, subagent-driven-development, test-driven-development, split-exec; check=high: requesting-code-review, code-review, verification-before-completion"
+    },
     "handoffButton": {
       "type": "string",
       "title": "Handoff button",
