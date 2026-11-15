@@ -183,7 +183,7 @@ weighted cost in all: 553722, per typed prompt: 27686
 | 打った入力あたりの重み付きコスト | `per typed prompt` | 入れる前の週より下がっているか |
 | 送った effort の分布 | `main` 行の effort ごとの `requests` | low・medium が増え、xhigh・max が減っているか |
 | 途中で effort が変わったターン | `sent at more than one effort` | 段階のスキルで切り替えたターンも数える。下の「区切りの後」と合わせて見る |
-| 区切りの後の水準 | `the request after a break` の行 | 区切り（Skill・ToolSearch・作業中の入力）の直後の問い合わせが、直前と同じ水準（`kept`）か、変わったか（`changed: モデル 前->後 回数`）。EFR-6 の前は ToolSearch の後に `high->medium` のようにアプリの水準へ戻っていた。後は、段階のスキル（例 `low->xhigh`）と、設定欄に effort を書いたスキルの分だけ変わるはず |
+| 区切りの後の水準 | `the request after a break` の行。`no break (should stay 0)` は区切りのない所で水準が変わった回数で、0 のはず。0 でなければ、まだ知らない区切りがある | 区切り（Skill・ToolSearch・作業中の入力）の直後の問い合わせが、直前と同じ水準（`kept`）か、変わったか（`changed: モデル 前->後 回数`）。EFR-6 の前は ToolSearch の後に `high->medium` のようにアプリの水準へ戻っていた。後は、段階のスキル（例 `low->xhigh`）と、設定欄に effort を書いたスキルの分だけ変わるはず |
 | ターン中の入力 | `while a turn ran` | 途中入力の多さ。上の指標の原因を見分けるのに使う |
 | subagent の effort | `subagent` 行 | effortless は既定で subagent を書き換えない。入れる前と同じ分布のはず |
 
@@ -221,11 +221,11 @@ effortless は、選んだ effort をすべてのリクエストに付けて送�
 | build（実装） | medium | executing-plans、subagent-driven-development、test-driven-development、split-exec |
 | check（確認） | high | requesting-code-review、code-review、verification-before-completion |
 
-- 表のスキルが読まれると、その場で段階の水準に切り替わる（ターンの途中でも）。段階は、次にスキルが読まれるまで、そのチャットの中で続く。表にないスキルが読まれると段階は終わり、次のメッセージから判定役に戻る
+- 表のスキルが読まれると、その場で段階の水準に切り替わる（ターンの途中でも）。段階は、表の別の段階のスキルが読まれるまで、そのチャットの中で続く。表にないスキル（memory-recall など、Claude が自分で読むものが多い）では変わらない。段階を抜けて判定役に戻すには、新しいチャットを開く
 - `/brainstorming` のように打ったときも同じ。判定役は呼ばない
-- 段階の中でも、メッセージで水準を名指しすれば（「Use low effort」）そちらが勝つ
+- 段階の中でも、メッセージで水準を名指しすれば（「Use low effort」）そちらが勝つ。名指ししたターンの途中で表のスキルが読まれたときは、そのターンは名指しの水準のまま、次のメッセージから段階の水準になる
 - Min・Max・save mode は段階の水準にもかかる
-- スキルの設定欄に `effort:` があれば、表より設定欄が勝つ。その水準がそのターンの終わりまで続き、区切りでもその水準を当て直す。段階は終わる。このとき Auto は切れない
+- スキルの設定欄に `effort:` があれば、表より設定欄が勝つ。その水準がそのターンの終わりまで続き、区切りでもその水準を当て直す（後から設定欄のないスキルが読まれたら、選んだ水準に戻す）。段階は変わらない。このとき Auto は切れない
 - 新しいチャット（`/clear` を含む）は段階なしで始まる
 - 表を変えるときは `/home/hadas/.claude/settings.json` の `pluginConfigs` → `effortless@effortless-fork` → `options` に `"phases": "design=max: brainstorming, writing-plans; build=medium: executing-plans"` のように書く（`名前=水準: スキル, スキル` を `;` で区切る）。`"phases": "off"` で段階を止める。新しいチャットから効く
 

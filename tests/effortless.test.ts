@@ -3766,7 +3766,7 @@ describe('phases: a loaded skill sets the level, again after every break', () =>
     return { asked, written, sent, files, at, typed, done, skill, debug }
   }
 
-  test('a table skill mid-turn switches at once; the phase holds the next turns with no judge until another skill loads', async ($, on) => {
+  test('a table skill mid-turn switches at once; the phase holds the next turns with no judge until another table skill', async ($, on) => {
     const r = rig($, on)
     await r.typed('refactor the whole auth module')
     await r.at('t1', 0)
@@ -3785,20 +3785,68 @@ describe('phases: a loaded skill sets the level, again after every break', () =>
     // A go-ahead in a phase is the phase's level, not the session's.
     await r.typed('はい')
     await r.at('t4', 0)
-    // A skill the table does not have ends the phase; the next message goes to the judge again.
+    // A skill the table does not have leaves the phase (many load on their own).
     await r.skill('commit')
     await r.at('t4', 1)
     await r.done('t4')
     await r.typed('now update the docs')
     await r.at('t5', 0)
+    // Another table skill moves to its phase, at once.
+    await r.skill('superpowers:executing-plans')
+    await r.at('t5', 1)
 
-    expect(r.sent).toEqual(['low', 'xhigh', 'xhigh', 'xhigh', 'low', 'xhigh', 'xhigh', 'low'])
-    expect(r.asked.length).toBe(2)
+    expect(r.sent).toEqual(['low', 'xhigh', 'xhigh', 'xhigh', 'low', 'xhigh', 'xhigh', 'xhigh', 'medium'])
+    expect(r.asked.length).toBe(1)
     const log = r.written['/x/proof.log'] ?? ''
     expect(log).toContain('skill superpowers:brainstorming: the design phase, xhigh')
     expect(log).toContain('request 1: a skill was loaded mid-turn, xhigh goes out (re-sent by effortless)')
-    expect(log).toContain('skill commit: the design phase ends')
-    expect(await r.debug()).toContain('phase: none')
+    expect(log).not.toContain('skill commit')
+    expect(log).toContain('skill superpowers:executing-plans: the design phase ends')
+    expect(log).toContain('skill superpowers:executing-plans: the build phase, medium')
+    expect(await r.debug()).toContain('phase: build (medium)')
+  })
+
+  test('a level named for the turn wins over a table skill loaded in it; the phase takes the next message', async ($, on) => {
+    const r = rig($, on)
+    await r.typed('Use low effort. Brainstorm names for the flag.')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 1)
+    await r.done('t1')
+    await r.typed('go on with the second one')
+    await r.at('t2', 0)
+    // Typed with the skill: the same.
+    await r.done('t2')
+    await r.typed('/brainstorming max effort, the whole settings model')
+    await $.skill.prompt({ skill: 'superpowers:brainstorming', text: 'the skill', frontmatter: {}, source: 'plugin' } as never)
+    await r.at('t3', 0)
+    expect(r.sent).toEqual(['low', 'low', 'xhigh', 'max'])
+    expect(r.asked.length).toBe(0)
+  })
+
+  test('the skill loaded last decides: one without its own effort after one with lets the pick go out again', async ($, on) => {
+    const r = rig($, on)
+    r.files['probe-high'] = { name: 'probe-high', effort: 'high' }
+    await r.typed('Use low effort. Load probe-high, then brainstorming.')
+    await r.at('t1', 0)
+    await r.skill('probe-high')
+    await r.at('t1', 1, 'high')
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 2, 'high')
+    // Named low holds this turn; the table skill took the phase for the next.
+    expect(r.sent).toEqual(['low', 'high', 'low'])
+    expect(await r.debug()).toContain('phase: design (xhigh)')
+  })
+
+  test('on Fable a ToolSearch right after a skill leaves the skill as the break: its phase goes out', async ($, on) => {
+    const r = rig($, on, 'claude-fable-5-2')
+    await r.typed('refactor the whole auth module')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await $.tool.call({ tool: 'ToolSearch', query: 'select:Read' } as never)
+    await r.at('t1', 1)
+    expect(r.sent).toEqual(['low', 'xhigh'])
+    expect(r.written['/x/proof.log'] ?? '').toContain('request 1: a skill was loaded mid-turn, xhigh goes out (re-sent by effortless)')
   })
 
   test("a skill whose own file sets effort keeps that level for its turn, also at a later break; Auto stays on", async ($, on) => {

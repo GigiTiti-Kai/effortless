@@ -564,6 +564,9 @@ async function pickByRule($: EngineInterface, thanks: boolean, said: string) {
 /** The phase's level as Auto's pick, within Min, Max and save mode, as a judge's verdict is. Nothing with Auto off. */
 async function pickPhase($: EngineInterface, why: string): Promise<Effort | undefined> {
   if (!phaseNow || !(await read($, isAuto))) return undefined
+  // Where Auto changes no effort (Haiku, a model whose cache an effort change rewrites), nor does a phase.
+  const modelId = await $.session.model().catch(() => '')
+  if (keyOf(modelId) === 'haiku' || !cacheSafe(modelId)) return undefined
   const inUse = await sessionModel($)
   const effort = capped(bounded(phaseNow.effort, config.floor, config.ceiling), (await read($, saveUntil)) !== null)
   await choose($, { model: inUse, effort, why, by: 'phase' })
@@ -574,16 +577,24 @@ async function pickPhase($: EngineInterface, why: string): Promise<Effort | unde
 /** A skill's text joined the main chat: a break. Its own effort: holds the turn; else the table's phase starts, or ends. */
 async function skillJoined($: EngineInterface, skill: string, effort: Effort | null) {
   breakSince = 'skill'
-  const was = phaseNow
-  phaseNow = effort ? null : (phaseOf(config.phases, skill) ?? null)
-  if (was && was !== phaseNow) void proof($, `skill ${skill}: the ${was.name} phase ends`)
+  // The skill loaded last decides: one without its own effort lets the pick go out again.
+  skillHold = effort
   if (effort) {
-    skillHold = effort
+    heldThisTurn = true
     void proof($, `skill ${skill} sets effort ${effort} itself: that level for the rest of this turn`)
-  } else if (phaseNow) {
-    const at = await pickPhase($, `${phaseNow.name} phase (${bareSkill(skill)})`)
-    void proof($, `skill ${skill}: the ${phaseNow.name} phase, ${at ?? 'Auto off, not applied'}`)
+    return
   }
+  const next = phaseOf(config.phases, skill)
+  if (!next) return
+  if (phaseNow && phaseNow !== next) void proof($, `skill ${skill}: the ${phaseNow.name} phase ends`)
+  phaseNow = next
+  // A level named for this turn (in its message or typed during it) still wins; the phase takes the next turn.
+  if (turnBusy() && (await read($, pick))?.by === 'named') {
+    void proof($, `skill ${skill}: the ${next.name} phase from the next message; this turn keeps the level you named`)
+    return
+  }
+  const at = await pickPhase($, `${next.name} phase (${bareSkill(skill)})`)
+  void proof($, `skill ${skill}: the ${next.name} phase, ${at ?? 'not applied (Auto off or a model Auto leaves alone)'}`)
 }
 
 /** Messages typed mid-turn that carry work: go-aheads and thanks carry none, so they never send a message to the judge. */
@@ -1227,17 +1238,24 @@ function goesOutAt(index: number, carried: unknown, model: string): Effort | und
   if (index > 0 && sentNow && !isBreak) return sentNow
   return EFFORTS.includes(carried as Effort) ? (carried as Effort) : undefined
 }
-// The phase of the chat (config.phases): set by a skill the table has, ended by any other inline skill or a new chat.
+// The phase of the chat (config.phases): set by a skill the table has, until another of its skills or a new chat. Other
+// skills leave it: many load on their own (memory-recall, using-superpowers) and would end every phase at once.
 let phaseNow: Phase | null = null
 // A skill whose own file sets effort: the app sends that level for the rest of the turn (EFR-3/4, measured), and the
 // mod re-sends it at each break instead of its pick (its author's word wins over the table).
 let skillHold: Effort | null = null
-// A main-chat Skill tool call is loading its skill now (skill.prompt also fires for a skill a subagent loads).
-let mainSkillLoading = false
-// The skill a message typed "/name" runs, until its skill.prompt arrives.
+// A skill with its own effort loaded in this turn: the app's effort reads the skill's until the turn ends, even after a
+// later skill without one.
+let heldThisTurn = false
+// Main-chat Skill tool calls loading their skill now (skill.prompt also fires for a skill a subagent loads).
+// shortcut: a subagent's skill expanded while a main Skill call of the same name runs counts as the main one; tell them
+// apart once skill.prompt carries an agent id.
+let mainSkillLoading = 0
+// The skill a message typed "/name" between turns runs, until its skill.prompt arrives or the turn's first request.
+// shortcut: a /name typed mid-turn is not followed; it runs as a turn of its own, after this one.
 let typedSkillName: string | null = null
-// What the skill.prompt just seen said, for the Skill tool call that loaded it to act on once it succeeds.
-let loadedSkill: { skill: string; effort: Effort | null } | null = null
+// What skill.prompt said of each skill a main Skill call is loading (by bare name), for that call to act on once it succeeds.
+const loadedSkills = new Map<string, Effort | null>()
 // The effort each main-chat turn's last request went out at (null: it carried none, as on Haiku), by turn id while it
 // runs, and by its duration once it ends: the line under a reply (TurnDuration) gets the turn's duration and no turn
 // id (2.1.323, measured), and shows its own turn's effort, not the one in use now.
@@ -4063,6 +4081,7 @@ export const register: Register = (on, options) => {
       breakSince = false
       // A skill's own effort lasts its turn (measured); the app's own comes back with the next.
       skillHold = null
+      heldThisTurn = false
     }
     // The newest reply's text: its last block carries the warning card (see AssistantMessage).
     if (!e.agentId && e.reason === 'answer') await update($, lastAnswer, () => e.answer.trim())
@@ -4251,15 +4270,18 @@ Saved to ${out}.md and .json` }
     const skill = slash && byPerson ? await typedSkill($, e.text) : undefined
     if (e.turnId === undefined) typedSkillName = skill?.name ?? null
     if (!byPerson || (slash && !skill) || (!wantsEffort && !wantsModel)) return next(e)
-    // A typed skill the phase table has: its phase decides when its text loads (skill.prompt), so no judge is asked.
-    if (skill && e.turnId === undefined && wantsEffort && phaseOf(config.phases, skill.name)) {
-      void proof($, `typed /${skill.name}: the phase table decides, no judge`)
-      return next(e)
-    }
     // On a model where an effort change rewrites the cache, Auto waits instead of judging.
     const modelId = await $.session.model()
     await modelIs($, modelId)
     if (!cacheSafe(modelId) && keyOf(modelId) !== 'haiku') return next(e)
+    // A typed skill the phase table has: its phase decides when its text loads (skill.prompt), so no judge is asked. A
+    // level named in the same message wins for this turn.
+    if (skill && e.turnId === undefined && wantsEffort && phaseOf(config.phases, skill.name)) {
+      const named = namedEffort(e.text)
+      if (named) await choose($, { model: await sessionModel($), effort: named, why: 'you asked for it', by: 'named' })
+      void proof($, `typed /${skill.name}: ${named ? `named level ${named}` : 'the phase table decides'}, no judge`)
+      return next(e)
+    }
     const said = skill ? `${e.text}
 
 [This is a slash command that runs a skill: ${skill.description || skill.name}. Judge the work the skill will do.]` : e.text
@@ -4423,7 +4445,7 @@ Saved to ${out}.md and .json` }
     if (e.agentId === undefined) await modelIs($, e.model)
     // While a skill's own effort holds the turn, the app's effort is the skill's, not the person's (and it comes back
     // with the next turn): not a change of theirs.
-    if (e.agentId === undefined && typeof e.effort === 'string' && !skillHold) {
+    if (e.agentId === undefined && typeof e.effort === 'string' && !heldThisTurn) {
       const seen = e.effort
       const isFirst = engineEffort === undefined
       const isByPerson = !isFirst && seen !== engineEffort
@@ -4449,9 +4471,11 @@ Saved to ${out}.md and .json` }
         else carried = []
       }
       freshTurn = false
+      // A /name whose skill never loaded is not left armed for a later one.
+      typedSkillName = null
     }
     // A skill that sets its own effort: that level for the rest of its turn, re-sent at each break instead of the pick.
-    if (e.agentId === undefined && skillHold && typeof e.effort === 'string' && cacheSafe(e.model)) {
+    if (e.agentId === undefined && skillHold && !routed && typeof e.effort === 'string' && cacheSafe(e.model)) {
       return yield* send(skillHold !== e.effort ? { ...e, effort: skillHold } : e)
     }
     // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort (on the first
@@ -4648,7 +4672,7 @@ Saved to ${out}.md and .json` }
   on('skill.prompt', async ($, e, next) => {
     const own = e.frontmatter?.effort
     const effort = EFFORTS.includes(own as Effort) ? (own as Effort) : null
-    if (mainSkillLoading) loadedSkill = { skill: e.skill, effort }
+    if (mainSkillLoading > 0) loadedSkills.set(bareSkill(e.skill), effort)
     else if (typedSkillName !== null && bareSkill(typedSkillName) === bareSkill(e.skill)) {
       typedSkillName = null
       await skillJoined($, e.skill, effort).catch(() => undefined)
@@ -4663,27 +4687,26 @@ Saved to ${out}.md and .json` }
     const isList = e.tool === 'TodoWrite' || e.tool === 'TaskCreate' || e.tool === 'TaskUpdate'
     const known = id !== undefined && (await read($, agentsState)).some(a => a.id === id)
     if (id === undefined && e.tool === 'Skill') {
-      loadedSkill = null
-      mainSkillLoading = true
+      const name = String((e as { skill?: unknown }).skill ?? '')
+      mainSkillLoading++
       let result
       try {
         result = await next(e)
       } finally {
-        mainSkillLoading = false
+        mainSkillLoading--
       }
       // A forked skill (context: fork) runs in a subagent: its text never joins this chat, so the turn's effort holds.
       const forked = (result.result as { status?: string } | undefined)?.status === 'forked'
-      const seen = loadedSkill as { skill: string; effort: Effort | null } | null
-      loadedSkill = null
-      if (!('deny' in result && result.deny) && !result.isError && !forked) {
-        await skillJoined($, seen?.skill ?? String((e as { skill?: unknown }).skill ?? ''), seen?.effort ?? null).catch(() => undefined)
-      }
+      const own = loadedSkills.get(bareSkill(name)) ?? null
+      loadedSkills.delete(bareSkill(name))
+      if (!('deny' in result && result.deny) && !result.isError && !forked) await skillJoined($, name, own).catch(() => undefined)
       return result
     }
     // ToolSearch changes the tools: a break on Sonnet and Opus (EFR-4), where the app goes back to its own effort.
     if (id === undefined && e.tool === 'ToolSearch') {
       const result = await next(e)
-      if (!('deny' in result && result.deny) && !result.isError) breakSince = 'toolsearch'
+      // A skill or a typed message seen first is the break that matters (ToolSearch is none on Fable).
+      if (!('deny' in result && result.deny) && !result.isError && !breakSince) breakSince = 'toolsearch'
       return result
     }
     if (!touch && !known && !(id === undefined && isList)) return next(e)

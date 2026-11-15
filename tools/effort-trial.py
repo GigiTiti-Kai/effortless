@@ -22,7 +22,14 @@ WEIGHT = {'input_tokens': 1, 'cache_creation_input_tokens': 1.25, 'cache_read_in
 
 
 # The tools after which a request is the first after a break (EFR-4): the app takes a new effort only there.
+# A Skill call that ran forked (context: fork) is no break but is counted here: the transcript does not say so plainly.
 BREAK_TOOLS = {'Skill': 'a Skill call', 'ToolSearch': 'ToolSearch'}
+# Attachments seen before a change of effort in real chats (2026-11-15): a message typed mid-turn, and two of unknown
+# effect, kept apart so a week shows whether they are breaks too.
+BREAK_ATTACHMENTS = {'queued_command': 'a message typed mid-turn', 'nested_memory': 'a nested CLAUDE.md (unconfirmed)',
+                     'prompt_snapshot': 'a prompt snapshot (unconfirmed)'}
+# A request whose effort changed with no break before it: Claude Code should never take a new level there (EFR-4).
+NO_BREAK = 'no break (should stay 0)'
 
 
 def inside(ts, since, until):
@@ -48,7 +55,7 @@ def scan(root, since, until):
                 continue
             sent, usage, turns = {}, {}, []
             # The break seen since the last request of this turn, and that request's effort.
-            pending, last = None, None
+            pending, last, calls = None, None, {}
             with open(os.path.join(folder, name), encoding='utf-8', errors='replace') as f:
                 for line in f:
                     try:
@@ -63,15 +70,25 @@ def scan(root, since, until):
                         sent[d.get('id')] = (p.get('model', '?'), (p.get('output_config') or {}).get('effort') or 'none')
                         if turns:
                             turns[-1].append(sent[d.get('id')][1])
-                        if who == 'main' and pending and last:
-                            breaks[pending][(sent[d.get('id')][0], last, sent[d.get('id')][1])] += 1
+                        if who == 'main' and last and (pending or last != sent[d.get('id')][1]):
+                            breaks[pending or NO_BREAK][(sent[d.get('id')][0], last, sent[d.get('id')][1])] += 1
                         pending, last = None, sent[d.get('id')][1]
                     elif d.get('type') == 'assistant' and d.get('requestRef'):
                         usage.setdefault(d['requestRef'], (d.get('message') or {}).get('usage') or {})
                         content = (d.get('message') or {}).get('content')
                         for block in content if isinstance(content, list) else []:
                             if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name') in BREAK_TOOLS:
-                                pending = BREAK_TOOLS[block['name']]
+                                pending = calls[block.get('id')] = BREAK_TOOLS[block['name']]
+                    elif d.get('type') == 'attachment' and (d.get('attachment') or {}).get('type') in BREAK_ATTACHMENTS:
+                        pending = pending or BREAK_ATTACHMENTS[d['attachment']['type']]
+                    elif d.get('type') == 'system' and d.get('subtype') == 'turn_duration':
+                        # A turn ended: the next request starts one (a typed prompt, or a subagent's notice), no break.
+                        pending, last = None, None
+                    elif d.get('type') == 'user' and isinstance((d.get('message') or {}).get('content'), list):
+                        # A failed or refused Skill or ToolSearch call is no break.
+                        for block in d['message']['content']:
+                            if isinstance(block, dict) and block.get('is_error') and calls.get(block.get('tool_use_id')) == pending:
+                                pending = None
                     elif (who == 'main' and d.get('type') == 'user' and inside(ts, since, until)
                           and (d.get('origin') or {}).get('kind') == 'human'):
                         # typed (or a suggestion accepted): at the prompt between turns; queued: typed while a turn ran.
@@ -106,12 +123,14 @@ def report(rows, prompts, breaks=None):
     total = sum(c['cost'] for c in rows.values())
     n = prompts['typed'] + prompts['queued']
     out += ['', f'weighted cost in all: {total:.0f}' + (f', per typed prompt: {total / n:.0f}' if n else '')]
-    if breaks:
+    if breaks is not None:
         out += ['', 'the request after a break, main chats (effort before -> after):']
         for kind, c in sorted(breaks.items()):
             same = sum(v for (_m, a, b), v in c.items() if a == b)
             moves = ', '.join(f'{m} {a}->{b} {v}' for (m, a, b), v in sorted(c.items()) if a != b)
             out.append(f"  after {kind}: {sum(c.values())}, kept {same}" + (f', changed: {moves}' if moves else ''))
+        if NO_BREAK not in breaks:
+            out.append(f'  after {NO_BREAK}: 0')
     return '\n'.join(out)
 
 
@@ -129,6 +148,15 @@ def self_test():
             {'type': 'assistant', 'requestRef': 'r1', 'message': {'usage': {'output_tokens': 10, 'cache_read_input_tokens': 100}}},
             {'type': 'assistant', 'requestRef': 'r1', 'message': {'content': [{'type': 'tool_use', 'name': 'Skill', 'input': {'skill': 'brainstorming'}}]}},
             {'type': 'api-request', 'id': 'r2', 'timestamp': '2026-11-16T01:00:04Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'high'}}},
+            # A ToolSearch that failed is no break: the change at r2b is counted as one with no break.
+            {'type': 'assistant', 'requestRef': 'r2', 'message': {'content': [{'type': 'tool_use', 'id': 'u1', 'name': 'ToolSearch'}]}},
+            {'type': 'user', 'timestamp': '2026-11-16T01:00:04Z', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'u1', 'is_error': True}]}},
+            {'type': 'api-request', 'id': 'r2b', 'timestamp': '2026-11-16T01:00:04Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'medium'}}},
+            # A message typed mid-turn shows as a queued_command attachment; a turn's end starts the next one afresh.
+            {'type': 'attachment', 'timestamp': '2026-11-16T01:00:04Z', 'attachment': {'type': 'queued_command'}},
+            {'type': 'api-request', 'id': 'r2c', 'timestamp': '2026-11-16T01:00:04Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'high'}}},
+            {'type': 'system', 'subtype': 'turn_duration', 'timestamp': '2026-11-16T01:00:04Z'},
+            {'type': 'api-request', 'id': 'r2d', 'timestamp': '2026-11-16T01:00:04Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'medium'}}},
             {'type': 'user', 'timestamp': '2026-11-16T01:00:05Z', 'origin': {'kind': 'human'}, 'promptSource': 'suggestion_accepted', 'message': {'content': 'go on'}},
             {'type': 'api-request', 'id': 'r0', 'timestamp': '2026-11-10T01:00:02Z', 'params': {'model': 'claude-opus-5-5', 'output_config': {'effort': 'max'}}},
         ]
@@ -143,14 +171,15 @@ def self_test():
                 f.write('\n'.join(json.dumps(x) for x in lines) + '\nnot json\n')
         rows, prompts, breaks = scan(root, '2026-11-16', '2026-11-16')
         assert prompts == {'typed': 2, 'queued': 1, 'turns': 1, 'changed': 1}, prompts
-        assert breaks == {'a Skill call': {('claude-opus-5-5', 'low', 'high'): 1}}, breaks
+        assert breaks == {'a Skill call': {('claude-opus-5-5', 'low', 'high'): 1}, NO_BREAK: {('claude-opus-5-5', 'high', 'medium'): 1},
+                          'a message typed mid-turn': {('claude-opus-5-5', 'medium', 'high'): 1}}, breaks
         assert 'after a Skill call: 1, kept 0, changed: claude-opus-5-5 low->high 1' in report(rows, prompts, breaks)
-        assert set(rows) == {('main', 'claude-opus-5-5', 'low'), ('main', 'claude-opus-5-5', 'high'), ('subagent', 'claude-haiku-5-5', 'none')}, rows
+        assert set(rows) == {('main', 'claude-opus-5-5', 'low'), ('main', 'claude-opus-5-5', 'high'), ('main', 'claude-opus-5-5', 'medium'), ('subagent', 'claude-haiku-5-5', 'none')}, rows
         low = rows[('main', 'claude-opus-5-5', 'low')]
         assert (low['requests'], low['output_tokens'], low['cost']) == (1, 10, 60), low
         # A cut within the day: from 01:00:03 on, r1 (01:00:02) and the typed prompt at 01:00:00 are out.
         rows, prompts, _ = scan(root, '2026-11-16T01:00:03', '2026-11-16')
-        assert set(rows) == {('main', 'claude-opus-5-5', 'high'), ('subagent', 'claude-haiku-5-5', 'none')}, rows
+        assert set(rows) == {('main', 'claude-opus-5-5', 'high'), ('main', 'claude-opus-5-5', 'medium'), ('subagent', 'claude-haiku-5-5', 'none')}, rows
         assert prompts['typed'] == 1 and prompts['queued'] == 0, prompts
         assert inside('2026-11-16T23:59:59.9Z', '2026-11-16', '2026-11-16') and not inside('2026-11-16T09:29:59Z', '2026-11-16T09:30', '2026-11-16')
     print('self-test ok')
