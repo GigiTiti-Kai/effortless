@@ -33,6 +33,16 @@ claude plugin disable effortless@effortless-fork --scope user
 
 戻すときは `claude plugin enable effortless@effortless-fork --scope user`。どちらも、新しく開いたチャットから効く。
 
+## 段階の表だけ止める（区切りでの当て直しは残す）
+
+`/home/hadas/.claude/settings.json` の `pluginConfigs` → `effortless@effortless-fork` → `options` に1行足す。
+
+```json
+"phases": "off"
+```
+
+新しく開いたチャットから、スキルを読んでも水準は変わらず、判定役が決める。区切りでの当て直し（ToolSearch などの後にアプリの水準へ戻さない動き）は残る。これも止めたいときは、上の「一時停止」か、下の「入れ直す」で前の commit に戻す。
+
 ## アンインストール
 
 ```bash
@@ -113,6 +123,12 @@ install.md 3章で `settings.json` の `env` に足した `EFFORTLESS_LOG` は�
 
 `claude plugin update` は版数（1.72.0）しか見ないので、フォークの main が進んでも入れ替わらない。新しい commit に替えるときは、外してから入れる。
 
+外すと `settings.json` の `pluginConfigs` にあった設定（例: `judge`、`handoffSkill`、`phases`）も消える（隔離した環境で確かめた）。先に控えて、入れるときに `--config` で渡す。
+
+```bash
+python3 -c "import json; print(json.load(open('/home/hadas/.claude/settings.json')).get('pluginConfigs', {}).get('effortless@effortless-fork'))"
+```
+
 ```bash
 claude plugin uninstall effortless@effortless-fork
 ```
@@ -122,8 +138,10 @@ claude plugin marketplace update effortless-fork
 ```
 
 ```bash
-claude plugin install effortless@effortless-fork
+claude plugin install effortless@effortless-fork --config judge=jev --config handoffSkill=handoff
 ```
+
+`--config` には、控えた `options` の中身を `キー=値` で1つずつ渡す（上は例）。控えが `None` なら `--config` は要らない。
 
 入ったら install.md の「4. 入ったことを確かめる」の3と4を行う。セットアップと Auto の on/off は store に残っているので、引き継がれる。
 
@@ -134,4 +152,4 @@ claude plugin install effortless@effortless-fork
 | 入れ方 | [install.md](install.md) |
 | 外したのに effort が書き換わる | 開きっぱなしのチャットが残っていないか。`claude plugin list` の表示 |
 
-最終更新日: 2026-11-14
+最終更新日: 2026-11-15

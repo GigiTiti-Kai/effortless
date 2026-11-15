@@ -201,7 +201,9 @@ What this does and does not show:
 
 ## Models
 
-Effort only changes on Opus 5.5, Sonnet 5.5 and Fable 5.2, and only on a turn's first request, when the pick differs from the app's own effort: later requests of a turn run at whatever the first went out with, until you type a message while the turn runs. The app then goes back to its own effort for the rest of that turn, and the footer, the line under the reply and the log say so. On Fable 5.1 and older models a change of effort between requests rewrote most of the prompt cache, which costs more than it saves, so Auto pauses there and the footer says `Paused`. Haiku takes no effort setting.
+Effort only changes on Opus 5.5, Sonnet 5.5 and Fable 5.2. Every request carries the pick when it differs from the app's own effort, but Claude Code takes a new level only on a turn's first request and on the first one after a break: a message you type while the turn runs, a skill that loads, or ToolSearch (Sonnet and Opus). At a break the app would go back to its own effort; effortless sends the pick again instead, and the footer, the line under the reply and the log show what went out. A skill whose own file sets `effort:` keeps that level for its turn.
+
+Phases: a skill in the phase table (setting `phases`) puts the chat in its phase, and from then on every message runs at that level, with no judge, until a skill of another phase loads (other skills leave it; a new chat starts with none). The default is `design=xhigh: brainstorming, grill-with-docs, grilling, writing-plans, plan-review-loop; build=medium: executing-plans, subagent-driven-development, test-driven-development, split-exec; check=high: requesting-code-review, code-review, verification-before-completion`. A level you name in a message still wins, and Min, Max and save mode apply. `off` switches phases off. On Fable 5.1 and older models a change of effort between requests rewrote most of the prompt cache, which costs more than it saves, so Auto pauses there and the footer says `Paused`. Haiku takes no effort setting.
 
 ## Split view
 

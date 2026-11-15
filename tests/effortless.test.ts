@@ -1,7 +1,7 @@
 import { describe, expect, mock, test as baseTest } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
+import { helperFloor, namedEffort, parsePhases, phaseOf, bareSkill, DEFAULT_PHASES, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
 import { ART_COLUMNS, artFrame, artPixel, MOVING } from '../hooks/art'
 import { isLight, lightHex, lightProps, setLight, setTheme, themedEls, themedSvg, tint, tintHex } from '../hooks/theme'
 import { importsOf, moduleLinks, moduleOf, relPath, withTouch } from '../hooks/agents'
@@ -56,7 +56,7 @@ function engine(on: On, env: Record<string, string> = {}, sessionModel = 'claude
   on('ui.status', () => ({ value: undefined }))
   on('session.messages', () => ({ value: said }) as never)
   on('session.model', () => ({ value: sessionModel }))
-  on('command.list', () => ({ value: [{ name: 'model' }, { name: 'effort' }, { name: 'session-handoff', source: 'user' }] as never }))
+  on('command.list', () => ({ value: [{ name: 'model' }, { name: 'effort' }, { name: 'session-handoff', source: 'user' }, { name: 'brainstorming', source: 'plugin', plugin: 'superpowers' }] as never }))
 }
 
 /** Records the slash commands the mod runs, as the person's own /model and /effort. */
@@ -1199,6 +1199,11 @@ describe('judge choice (plugin settings)', () => {
       helpers: 'off',
       theme: 'violet',
       appearance: 'auto',
+      phases: [
+        { name: 'design', effort: 'xhigh', skills: ['brainstorming', 'grill-with-docs', 'grilling', 'writing-plans', 'plan-review-loop'] },
+        { name: 'build', effort: 'medium', skills: ['executing-plans', 'subagent-driven-development', 'test-driven-development', 'split-exec'] },
+        { name: 'check', effort: 'high', skills: ['requesting-code-review', 'code-review', 'verification-before-completion'] },
+      ],
     })
     expect(readConfig({ swampAt: '20' })).toMatchObject({ swampAt: 20 })
     expect(readConfig({ swampAt: '33' }).swampAt).toBe(70)
@@ -2824,7 +2829,7 @@ describe('dashboard', () => {
   })
 
   // No options: the manifest's defaults, as after `claude plugin install` with no --config (docs/fork/install.md).
-  test('the cheaper model is off by default: a verdict for a cheaper model never routes, and only request 0 changes effort', async ($, on) => {
+  test('the cheaper model is off by default: a verdict for a cheaper model never routes, and every request carries the picked effort', async ($, on) => {
     engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
     let verdict = '{"model":"haiku","effort":"low","why":"simple question"}'
     on('model.complete', () => ({ value: { isAnswered: true as const, text: verdict, usage: USAGE } }))
@@ -2844,7 +2849,7 @@ describe('dashboard', () => {
       verdict = '{"model":"sonnet","effort":"high","why":"work"}'
     }
     expect(sent.map(s => s.model)).toEqual(Array(6).fill('claude-fable-5-2'))
-    expect(sent.map(s => s.effort)).toEqual(['low', 'medium', 'medium', 'high', 'medium', 'medium'])
+    expect(sent.map(s => s.effort)).toEqual(['low', 'low', 'low', 'high', 'high', 'high'])
     const log = written['/x/proof.log'] ?? ''
     expect(log).not.toMatch(/runs on|-> claude-(haiku|sonnet)/)
     expect(String((await $.command.run({ command: 'effortless', args: 'debug' })).text)).toContain("model: always the chat's")
@@ -3424,7 +3429,7 @@ describe('a message typed while a turn runs', () => {
     expect(sent.map(s => s.effort)).toEqual(['high', 'high', 'low'])
   })
 
-  test("a level named mid-turn is not rewritten mid-turn; it is the next turn's, with no judge", async ($, on) => {
+  test('a level named mid-turn runs from the next request on (a typed message is a break), and the next turn too, with no judge', async ($, on) => {
     engine(on)
     const asked = judgeSaysNow(on, { effort: 'low' })
     const sent = recordSteps(on)
@@ -3437,11 +3442,11 @@ describe('a message typed while a turn runs', () => {
     await stepOf($, 't2', 0)
 
     expect(asked.length).toBe(1)
-    // The second request goes out as the app sends it, not rewritten: after a typed message that is its own effort.
-    expect(sent.map(s => s.effort)).toEqual(['low', 'high', 'max'])
+    // The request after the typed message takes the level it named.
+    expect(sent.map(s => s.effort)).toEqual(['low', 'max', 'max'])
   })
 
-  test('after a message typed mid-turn the app\'s own effort is what the log, debug, footer and the reply line show', async ($, on) => {
+  test('after a message typed mid-turn the pick is sent again, and that is what the log, debug, footer and the reply line show', async ($, on) => {
     engine(on, { EFFORTLESS_LOG: '/x/proof.log' })
     judgeSaysNow(on, { effort: 'low' })
     const written: Record<string, string> = {}
@@ -3469,26 +3474,25 @@ describe('a message typed while a turn runs', () => {
     expect(await lastRequest()).toContain('at high')
     await $.prompt.submit({ text: 'thanks', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
     await at(2)
-    // Not rewritten back to high: the app's low goes out, and that is what is recorded.
-    expect(sent.map(s => s.effort)).toEqual(['high', 'low', 'low'])
-    expect(await lastRequest()).toContain('sent claude-opus-5-5 at low')
+    // A typed message is a break: the app would go back to its low, so the pick (high) goes with every request.
+    expect(sent.map(s => s.effort)).toEqual(['high', 'high', 'high'])
+    expect(await lastRequest()).toContain('sent claude-opus-5-5 at high')
     const log = written['/x/proof.log'] ?? ''
     expect(log).toContain('response 1 at high')
-    expect(log).toContain('request 2: a message was typed mid-turn, so the app sends its own low')
-    expect(log).toContain('response 2 at low')
+    expect(log).toContain('request 2: a message was typed mid-turn, high goes out (re-sent by effortless)')
+    expect(log).toContain('response 2 at high')
     const footer = await $.ui.mount(FOOTER)
     const level = async () => (await footer.findAll({ type: 'Text' })).map(t => t.text.trim()).find(t => /^(Low|Medium|High|Max)$/.test(t))
-    expect(await level()).toBe('Low')
+    expect(await level()).toBe('High')
     await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 4321, isAborted: false, reason: 'answer' } as never)
     const line = await $.ui.mount({ plugin: 'effortless', surface: 'terminal', component: 'TurnDuration', props: { word: 'Worked', durationMs: 4321, isExpanded: false } } as never)
-    expect(await drawn(line)).toContain('✦ Low')
-    // Once the turn is over the footer still shows what went out last, not the turn's pick (high).
+    expect(await drawn(line)).toContain('✦ High')
     await footer.redraw()
-    expect(await level()).toBe('Low')
+    expect(await level()).toBe('High')
     await Promise.all([line.unmount(), footer.unmount()])
   })
 
-  test('after a skill is loaded mid-turn the app\'s own effort is what goes out and what is recorded', async ($, on) => {
+  test('after a skill is loaded mid-turn the pick is sent again, and that is what is recorded', async ($, on) => {
     engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, 'claude-fable-5-2')
     const written: Record<string, string> = {}
     on('fs.write', (_$, e) => {
@@ -3513,12 +3517,12 @@ describe('a message typed while a turn runs', () => {
     await at('s1', 0)
     await $.tool.call({ tool: 'Skill', skill: 'superpowers:using-superpowers' } as never)
     await at('s1', 1)
-    // Measured on 2.1.325: after the skill's text joins the chat the app sends its own high, so that is recorded.
-    expect(sent.map(s => s.effort)).toEqual(['low', 'high'])
-    expect(await lastRequest()).toContain('sent claude-fable-5-2 at high')
+    // Measured on 2.1.325: after the skill's text joins the chat the app would send its own high; the pick goes instead.
+    expect(sent.map(s => s.effort)).toEqual(['low', 'low'])
+    expect(await lastRequest()).toContain('sent claude-fable-5-2 at low')
     const log = written['/x/proof.log'] ?? ''
-    expect(log).toContain('request 1: a skill was loaded mid-turn, so the app sends its own high')
-    expect(log).toContain('response 1 at high')
+    expect(log).toContain('request 1: a skill was loaded mid-turn, low goes out (re-sent by effortless)')
+    expect(log).toContain('response 1 at low')
     // The next turn starts over: its first request carries the pick again, and a later one keeps it.
     await $.turn.complete({ turnId: 's1', answer: 'done', durationMs: 1234, isAborted: false, reason: 'answer' } as never)
     await $.prompt.submit({ text: 'Use low effort. Run the tests again.', wait: false, origin: { kind: 'composer' } })
@@ -3581,10 +3585,10 @@ describe('a message typed while a turn runs', () => {
     expect(await lit()).toBe('e-high')
     await $.prompt.submit({ text: 'thanks', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
     await at(1)
-    expect(await lit()).toBe('e-low')
+    // After the typed message the pick (high) is sent again, not the app's low.
+    expect(await lit()).toBe('e-high')
     await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 1234, isAborted: false, reason: 'answer' } as never)
-    // The turn's pick was high; low is what went out last.
-    expect(await lit()).toBe('e-low')
+    expect(await lit()).toBe('e-high')
     // A pick between turns is what the rows show next.
     await rows.press({ key: 'e-max' })
     expect(await lit()).toBe('e-max')
@@ -3668,7 +3672,7 @@ describe('a message typed while a turn runs', () => {
     expect(sent.map(s => s.effort)).toEqual(['high', 'low'])
   })
 
-  test("only a turn's first request is rewritten, and only when the pick differs from the app's effort", async ($, on) => {
+  test("every request carries the pick when it differs from the app's effort; the level in force is what is recorded", async ($, on) => {
     engine(on)
     const says = { effort: 'high' }
     judgeSaysNow(on, says)
@@ -3684,8 +3688,7 @@ describe('a message typed while a turn runs', () => {
     await stepOf($, 't2', 1)
     await stepOf($, 't2', 2)
 
-    expect(sent.map(s => s.effort)).toEqual(['high', 'low', 'high', 'high'])
-    // What went out: the later requests ran at the first one's low, and the log says so.
+    expect(sent.map(s => s.effort)).toEqual(['high', 'low', 'low', 'low'])
     expect(await lastRequest()).toContain('sent claude-opus-5-5 at low')
   })
 
@@ -3704,6 +3707,259 @@ describe('a message typed while a turn runs', () => {
     await stepOf($, 't1', 2)
 
     expect(sent.map(s => s.effort)).toEqual(['high', 'high', 'high'])
+  })
+})
+
+describe('phases: a loaded skill sets the level, again after every break', () => {
+  test('parsePhases reads name=level: skills rows; a bad row or "off" is none; names match without their plugin', () => {
+    const rows = parsePhases('design=max: brainstorming, superpowers:writing-plans; bogus=huge: x; check=high:  ; build = low : tdd')
+    expect(rows).toEqual([
+      { name: 'design', effort: 'max', skills: ['brainstorming', 'writing-plans'] },
+      { name: 'build', effort: 'low', skills: ['tdd'] },
+    ])
+    expect(parsePhases('off')).toEqual([])
+    expect(parsePhases('')).toEqual([])
+    expect(phaseOf(rows, 'superpowers:brainstorming')?.name).toBe('design')
+    expect(phaseOf(rows, '/writing-plans')?.name).toBe('design')
+    expect(phaseOf(rows, 'commit')).toBeUndefined()
+    expect(bareSkill('/superpowers:brainstorming')).toBe('brainstorming')
+    expect(parsePhases(DEFAULT_PHASES).map(p => `${p.name}=${p.effort}`)).toEqual(['design=xhigh', 'build=medium', 'check=high'])
+  })
+
+  /** The engine beneath: judge low, every request recorded with the effort it carried, a Skill call that expands the skill. */
+  function rig($: Engine, on: On, model = 'claude-opus-5-5') {
+    engine(on, { EFFORTLESS_LOG: '/x/proof.log' }, model)
+    mock.clock(on)
+    const asked: string[] = []
+    on('model.complete', (_$, e) => {
+      asked.push(e.prompt)
+      return { value: { isAnswered: true as const, text: '{"model":"opus","effort":"low","why":"small"}', usage: USAGE } }
+    })
+    const written: Record<string, string> = {}
+    on('fs.write', (_$, e) => {
+      written[String(e.path)] = String(e.text)
+      return { value: undefined } as never
+    })
+    const sent: unknown[] = []
+    on('turn.step', async function* (_$, e) {
+      sent.push(e.effort)
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: USAGE } as never
+    })
+    on('skill.prompt', (_$, e) => ({ text: e.text }))
+    // A skill's frontmatter by name; the Skill tool expands it (skill.prompt) as the engine does.
+    const files: Record<string, Record<string, string>> = {}
+    on('tool.call', async (_$, e) => {
+      const skill = (e as { skill?: string }).skill
+      if (e.tool === 'Skill' && skill) await $.skill.prompt({ skill, text: 'the skill', frontmatter: files[skill] ?? {}, source: 'plugin' } as never)
+      return { result: 'ok', isError: false } as never
+    })
+    on('turn.complete', () => ({ text: '' }) as never)
+    const at = async (turnId: string, index: number, effort = 'medium') => {
+      for await (const _ of $.turn.step({ turnId, index, model, effort, messageCount: 1 })) {
+        // drain
+      }
+    }
+    const typed = (text: string, turnId?: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' }, ...(turnId ? { turnId } : {}) } as never)
+    const done = (turnId: string) => $.turn.complete({ turnId, answer: '', durationMs: 1, isAborted: false, reason: 'completed' } as never)
+    const skill = (name: string) => $.tool.call({ tool: 'Skill', skill: name } as never)
+    const debug = async () => String((await $.command.run({ command: 'effortless', args: 'debug' })).text)
+    return { asked, written, sent, files, at, typed, done, skill, debug }
+  }
+
+  test('a table skill mid-turn switches at once; the phase holds the next turns with no judge until another table skill', async ($, on) => {
+    const r = rig($, on)
+    await r.typed('refactor the whole auth module')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 1)
+    await r.at('t1', 2)
+    await r.done('t1')
+    // The next message runs in the design phase: no judge.
+    await r.typed('what about the error types?')
+    await r.at('t2', 0)
+    await r.done('t2')
+    // A level the person names still wins.
+    await r.typed('Use low effort. Just list the files.')
+    await r.at('t3', 0)
+    await r.done('t3')
+    // A go-ahead in a phase is the phase's level, not the session's.
+    await r.typed('はい')
+    await r.at('t4', 0)
+    // A skill the table does not have leaves the phase (many load on their own).
+    await r.skill('commit')
+    await r.at('t4', 1)
+    await r.done('t4')
+    await r.typed('now update the docs')
+    await r.at('t5', 0)
+    // Another table skill moves to its phase, at once.
+    await r.skill('superpowers:executing-plans')
+    await r.at('t5', 1)
+
+    expect(r.sent).toEqual(['low', 'xhigh', 'xhigh', 'xhigh', 'low', 'xhigh', 'xhigh', 'xhigh', 'medium'])
+    expect(r.asked.length).toBe(1)
+    const log = r.written['/x/proof.log'] ?? ''
+    expect(log).toContain('skill superpowers:brainstorming: the design phase, xhigh')
+    expect(log).toContain('request 1: a skill was loaded mid-turn, xhigh goes out (re-sent by effortless)')
+    expect(log).not.toContain('skill commit')
+    expect(log).toContain('skill superpowers:executing-plans: the design phase ends')
+    expect(log).toContain('skill superpowers:executing-plans: the build phase, medium')
+    expect(await r.debug()).toContain('phase: build (medium)')
+  })
+
+  test('a level named for the turn wins over a table skill loaded in it; the phase takes the next message', async ($, on) => {
+    const r = rig($, on)
+    await r.typed('Use low effort. Brainstorm names for the flag.')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 1)
+    await r.done('t1')
+    await r.typed('go on with the second one')
+    await r.at('t2', 0)
+    // Typed with the skill: the same.
+    await r.done('t2')
+    await r.typed('/brainstorming max effort, the whole settings model')
+    await $.skill.prompt({ skill: 'superpowers:brainstorming', text: 'the skill', frontmatter: {}, source: 'plugin' } as never)
+    await r.at('t3', 0)
+    expect(r.sent).toEqual(['low', 'low', 'xhigh', 'max'])
+    expect(r.asked.length).toBe(0)
+  })
+
+  test('the skill loaded last decides: one without its own effort after one with lets the pick go out again', async ($, on) => {
+    const r = rig($, on)
+    r.files['probe-high'] = { name: 'probe-high', effort: 'high' }
+    await r.typed('Use low effort. Load probe-high, then brainstorming.')
+    await r.at('t1', 0)
+    await r.skill('probe-high')
+    await r.at('t1', 1, 'high')
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 2, 'high')
+    // Named low holds this turn; the table skill took the phase for the next.
+    expect(r.sent).toEqual(['low', 'high', 'low'])
+    expect(await r.debug()).toContain('phase: design (xhigh)')
+  })
+
+  test('on Fable a ToolSearch right after a skill leaves the skill as the break: its phase goes out', async ($, on) => {
+    const r = rig($, on, 'claude-fable-5-2')
+    await r.typed('refactor the whole auth module')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await $.tool.call({ tool: 'ToolSearch', query: 'select:Read' } as never)
+    await r.at('t1', 1)
+    expect(r.sent).toEqual(['low', 'xhigh'])
+    expect(r.written['/x/proof.log'] ?? '').toContain('request 1: a skill was loaded mid-turn, xhigh goes out (re-sent by effortless)')
+  })
+
+  test("a skill whose own file sets effort keeps that level for its turn, also at a later break; Auto stays on", async ($, on) => {
+    const r = rig($, on)
+    r.files['probe-high'] = { name: 'probe-high', effort: 'high' }
+    await r.typed('Use low effort. Load probe-high, then search the tools.')
+    await r.at('t1', 0)
+    await r.skill('probe-high')
+    // The app now sends the skill's high (EFR-4 E0b: its own effort reads high too).
+    await r.at('t1', 1, 'high')
+    await $.tool.call({ tool: 'ToolSearch', query: 'select:Read' } as never)
+    await r.at('t1', 2, 'high')
+    expect(await r.debug()).toContain('a skill holds high')
+    await r.done('t1')
+    // The next turn the app is back on medium: not a change of the person's, so Auto is still on.
+    await r.typed('Use low effort. Now the next step.')
+    await r.at('t2', 0, 'medium')
+
+    expect(r.sent).toEqual(['low', 'high', 'high', 'low'])
+    const log = r.written['/x/proof.log'] ?? ''
+    expect(log).toContain('skill probe-high sets effort high itself')
+    expect(log).not.toContain('Auto off')
+    expect(log).toContain("request 2: ToolSearch ran mid-turn, high goes out (the app's own)")
+  })
+
+  test('a table skill whose own file sets the session level keeps it: the frontmatter wins over the table (EFR-4 SM)', async ($, on) => {
+    const r = rig($, on)
+    r.files['superpowers:brainstorming'] = { name: 'brainstorming', effort: 'medium' }
+    await r.typed('Use low effort. Brainstorm the API.')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    // The skill says medium, the session is medium: the request carries medium, not the table's xhigh.
+    await r.at('t1', 1, 'medium')
+    await r.done('t1')
+    expect(r.sent).toEqual(['low', 'medium'])
+    expect(await r.debug()).toContain('phase: none')
+  })
+
+  test('ToolSearch is a break: the pick goes out after it, not the app\'s level', async ($, on) => {
+    const r = rig($, on)
+    await r.typed('fix the typo')
+    await r.at('t1', 0)
+    await $.tool.call({ tool: 'ToolSearch', query: 'select:Read' } as never)
+    await r.at('t1', 1)
+    await r.at('t1', 2)
+    expect(r.sent).toEqual(['low', 'low', 'low'])
+    expect(r.written['/x/proof.log'] ?? '').toContain('request 1: ToolSearch ran mid-turn, low goes out (re-sent by effortless)')
+  })
+
+  test('a turn nobody typed (a subagent\'s notice) runs at the phase, not at a level named the turn before', async ($, on) => {
+    const r = rig($, on)
+    await r.typed('refactor the whole auth module')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 1)
+    await r.done('t1')
+    await r.typed('Use low effort. Just list the files.')
+    await r.at('t2', 0)
+    await r.done('t2')
+    // No prompt.submit: the turn a finished subagent's notice starts.
+    await r.at('notification', 0)
+    await r.at('notification', 1)
+    expect(r.sent).toEqual(['low', 'xhigh', 'low', 'xhigh', 'xhigh'])
+    expect(r.written['/x/proof.log'] ?? '').toContain('turn started with no message: the design phase, xhigh')
+  })
+
+  test('on Fable ToolSearch is no break: the log says so, and the level in force goes on', async ($, on) => {
+    const r = rig($, on, 'claude-fable-5-2')
+    await r.typed('fix the typo')
+    await r.at('t1', 0)
+    await $.tool.call({ tool: 'ToolSearch', query: 'select:Read' } as never)
+    await r.at('t1', 1)
+    expect(r.sent).toEqual(['low', 'low'])
+    expect(r.written['/x/proof.log'] ?? '').toContain('request 1: ToolSearch ran mid-turn, low goes out (no break on this model)')
+  })
+
+  test('a typed table skill starts its phase with no judge; a skill a subagent loads changes nothing', async ($, on) => {
+    const r = rig($, on)
+    await r.typed('/brainstorming the settings page')
+    await $.skill.prompt({ skill: 'superpowers:brainstorming', text: 'the skill', frontmatter: {}, source: 'plugin' } as never)
+    await r.at('t1', 0)
+    await r.done('t1')
+    expect(r.asked.length).toBe(0)
+    // A subagent's Skill call and a preloaded skill: neither is the main chat's.
+    await $.tool.call({ tool: 'Skill', skill: 'commit', agentId: 'a1' } as never)
+    await $.skill.prompt({ skill: 'superpowers:verification-before-completion', text: 'preloaded', frontmatter: {}, source: 'plugin' } as never)
+    await r.typed('and the footer?')
+    await r.at('t2', 0)
+    expect(r.sent).toEqual(['xhigh', 'xhigh'])
+    expect(await r.debug()).toContain('phase: design (xhigh)')
+  })
+
+  test('phases switched off: skills change nothing and the judge decides', { options: { phases: 'off' } } as never, async ($, on) => {
+    const r = rig($, on)
+    await r.typed('refactor the whole auth module')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 1)
+    await r.done('t1')
+    await r.typed('what about the error types?')
+    await r.at('t2', 0)
+    expect(r.sent).toEqual(['low', 'low', 'low'])
+    expect(r.asked.length).toBe(2)
+  })
+
+  test('with Auto off a table skill starts no level: the app\'s own effort goes out', async ($, on) => {
+    const r = rig($, on)
+    await $.command.run({ command: 'effortless', args: 'auto' })
+    await r.typed('refactor the whole auth module')
+    await r.at('t1', 0)
+    await r.skill('superpowers:brainstorming')
+    await r.at('t1', 1)
+    expect(r.sent).toEqual(['medium', 'medium'])
   })
 })
 

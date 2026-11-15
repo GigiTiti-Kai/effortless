@@ -27,7 +27,8 @@ export type Pick = {
   why: string
   /** named: the person said the level in the prompt ("max effort"). */
   /** rule: decided without a judge, e.g. thanks is low. */
-  by: 'jev' | 'haiku' | 'manual' | 'named' | 'rule'
+  /** phase: the phase table's level for the skill loaded last (see JudgeConfig.phases). */
+  by: 'jev' | 'haiku' | 'manual' | 'named' | 'rule' | 'phase'
   /** How sure the judge was of the effort, 0-1, when it said. */
   sure?: number
   /** Haiku only: why a handoff would suit now (a few words), when it said it would. */
