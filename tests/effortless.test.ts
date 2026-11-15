@@ -1,7 +1,7 @@
 import { describe, expect, mock, test as baseTest } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { helperFloor, namedEffort, parsePhases, phaseOf, bareSkill, DEFAULT_PHASES, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, jevFloor, jevRequest, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
+import { helperFloor, namedEffort, parsePhases, phaseOf, bareSkill, DEFAULT_PHASES, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, jevFloor, jevRequest, leanedVerdict, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
 import { ART_COLUMNS, artFrame, artPixel, MOVING } from '../hooks/art'
 import { isLight, lightHex, lightProps, setLight, setTheme, themedEls, themedSvg, tint, tintHex } from '../hooks/theme'
 import { importsOf, moduleLinks, moduleOf, relPath, withTouch } from '../hooks/agents'
@@ -686,8 +686,16 @@ describe('helpers', () => {
     expect(parseJevAnswer(jevReply('low', 0.4), current)?.effort).toBe('low')
     const raised = parseJevAnswer(withNouls('low', 0.8, 0.1), current)
     expect(raised).toMatchObject({ effort: 'high', why: 'raised from low' })
-    // No sure on a raised level, so a lean down (bias -2) cannot undo the floor.
-    expect(tipped(raised!.effort, raised!.sure, -2)).toBe('high')
+    expect(raised?.least).toBe('high')
+    // A lean down (effortBias -1/-2) never undoes the floor, also when Jev's unsure pick already sits on it.
+    const onFloor = JSON.stringify({ answers: { effort: { choice: 'medium', confidence: 0.4 }, continues_work: { noul: 0.1 }, needs_lookup: { noul: 0.8 } } })
+    const v = { ...parseJevAnswer(onFloor, current)!, by: 'jev' as const }
+    expect(v).toMatchObject({ effort: 'medium', sure: 0.4, least: 'medium' })
+    expect(leanedVerdict(v, -1)).toBe('medium')
+    expect(leanedVerdict(v, -2)).toBe('medium')
+    expect(leanedVerdict(v, 1)).toBe('high')
+    expect(leanedVerdict({ ...v, least: undefined }, -1)).toBe('low')
+    expect(parseJevAnswer(withNouls('low', 0.1, 0.1), current)).not.toHaveProperty('least')
     expect(parseJevAnswer(withNouls('low', 0.1, 0.8), current)?.effort).toBe('medium')
     expect(parseJevAnswer(withNouls('low', 0.49, 0.49), current)?.effort).toBe('low')
     expect(parseJevAnswer(withNouls('xhigh', 0.9, 0.9), current)?.effort).toBe('xhigh')
@@ -1652,6 +1660,18 @@ describe('short answers to a question', () => {
     await step($)
     expect(asked.length).toBe(0)
     expect(sent[0]?.effort).toBe('high')
+  })
+
+  test('a lean down (effortBias -1) does not send less than the lookup floor, even when Jev picked the floor itself', { options: { judge: 'jev', effortBias: '-1' } } as never, async ($, on) => {
+    engine(on, { TYPESAFE_API_KEY: 'k' }, 'claude-sonnet-5-5')
+    mock.clock(on)
+    judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    const reply = JSON.stringify({ answers: { effort: { choice: 'medium', confidence: 0.4 }, continues_work: { noul: 0.1 }, needs_lookup: { noul: 0.8 } } })
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: reply } }))
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'why does the nightly sync fail on staging', wait: false, origin: { kind: 'composer' } })
+    await step($)
+    expect(sent[0]?.effort).toBe('medium')
   })
 
   test('with modelAuto on, Jev is asked the model question too', { options: { judge: 'auto', modelAuto: 'on' } } as never, async ($, on) => {

@@ -575,7 +575,7 @@ export function keepsEffort(message: string, context: string): boolean {
 /** The pick a verdict makes, within the person's slider, Min, Max and save mode. */
 async function followVerdict($: EngineInterface, verdict: Pick, inUse: ModelKey) {
   const saving = (await read($, saveUntil)) !== null
-  const leaned = bounded(tipped(verdict.effort, verdict.sure, config.bias), config.floor, config.ceiling)
+  const leaned = bounded(leanedVerdict(verdict, config.bias), config.floor, config.ceiling)
   const effort = capped(leaned, saving)
   const why = effort !== leaned ? 'save mode' : leaned !== verdict.effort ? 'your settings' : verdict.why
   await choose($, { ...verdict, model: inUse, effort, why })
@@ -680,8 +680,14 @@ export function jevFloor(effort: Effort, current: Effort | undefined, continuesW
   return at(effort) < at(floor) ? floor : effort
 }
 
-/** Jev's answer as a verdict: its effort raised to the Nouls' floors. The model is Jev's only when it was asked. */
-export function parseJevAnswer(text: string, current: Pick | null): { model: ModelKey; effort: Effort; why: string; sure?: number } | undefined {
+/** The verdict's effort leaned by the person's effortBias, never below the floor Jev's Nouls set. */
+export function leanedVerdict(verdict: Pick, bias: number): Effort {
+  const leaned = tipped(verdict.effort, verdict.sure, bias)
+  return verdict.least && EFFORTS.indexOf(leaned) < EFFORTS.indexOf(verdict.least) ? verdict.least : leaned
+}
+
+/** Jev's answer as a verdict: its effort raised to the Nouls' floors, which it keeps as least. The model is Jev's only when it was asked. */
+export function parseJevAnswer(text: string, current: Pick | null): { model: ModelKey; effort: Effort; why: string; sure?: number; least?: Effort } | undefined {
   let json: Record<string, unknown>
   try {
     json = JSON.parse(text)
@@ -695,11 +701,13 @@ export function parseJevAnswer(text: string, current: Pick | null): { model: Mod
   if (!chosen || !EFFORTS.includes(chosen)) return undefined
   const model = MODELS.find(m => m.key === answers?.model?.choice)?.key ?? current?.model ?? 'sonnet'
   const sure = answers?.effort?.confidence ?? answers?.effort?.probabilities?.[chosen]
-  const effort = jevFloor(chosen, current?.effort, answers?.continues_work?.noul, answers?.needs_lookup?.noul)
-  // A raised level carries no sure: the odds were for Jev's own pick, and the lean (tipped) must not undo the floor.
-  if (effort !== chosen) return { model, effort, why: `raised from ${chosen}` }
-  if (typeof sure !== 'number') return { model, effort, why: '' }
-  return { model, effort, why: `${Math.round(sure * 100)}% sure`, sure }
+  const least = jevFloor('low', current?.effort, answers?.continues_work?.noul, answers?.needs_lookup?.noul)
+  const floored = least !== 'low' ? { least } : {}
+  const effort = EFFORTS.indexOf(chosen) < EFFORTS.indexOf(least) ? least : chosen
+  // A raised level carries no sure: the odds were for Jev's own pick.
+  if (effort !== chosen) return { model, effort, why: `raised from ${chosen}`, ...floored }
+  if (typeof sure !== 'number') return { model, effort, why: '', ...floored }
+  return { model, effort, why: `${Math.round(sure * 100)}% sure`, sure, ...floored }
 }
 
 let askJevFile: EnvAsk | undefined
@@ -3885,7 +3893,7 @@ async function helperEffort($: EngineInterface, prompt: string, type: string): P
   const { verdict } = await judge($, helperQuestion(prompt, type), null)
   if (!verdict) return null
   const saving = (await read($, saveUntil)) !== null
-  const leaned = tipped(verdict.effort, verdict.sure, config.bias)
+  const leaned = leanedVerdict(verdict, config.bias)
   const effort = capped(bounded(leaned, helperFloor(config.floor, config.ceiling), config.ceiling), saving)
   return { ...verdict, effort, why: effort !== leaned && EFFORTS.indexOf(leaned) < EFFORTS.indexOf(effort) ? `${verdict.why} (helpers start at medium)` : verdict.why }
 }
