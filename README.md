@@ -126,7 +126,7 @@ limit passes 80% (with a Save mode that caps effort at Medium), and when your ju
 
 Haiku 5.5 runs on your own Claude login and needs no key. With the Handoff button on **When advised**, it makes the handoff call: from 30% of context, every second message, it reads what the chat was for, the trail of topics, the last reply and how full the context is, and says a fresh chat would suit only for a clear reason. Then the Compact button turns into a lit Handoff with the reason. The default, **Always**, keeps Handoff on the bar and asks Haiku nothing.
 
-Haiku also picks the effort, unless you add Jev, TypeSafe's faster judge (about 0.25 s against about 1 s). With a key, Jev answers the effort first and Haiku steps in whenever Jev is unsure. Run `/plugin configure effortless@effortless` in Claude Code, or use the setup guide or the Judge card in Settings.
+Haiku also picks the effort, unless you add Jev, TypeSafe's faster judge (about 0.25 s against about 1 s). With a key, Jev answers the effort first, along with whether the message carries on work under way and whether it needs looking things up; those two raise its pick to at least the current effort or medium. Haiku steps in only when Jev is down or slow. Run `/plugin configure effortless@effortless` in Claude Code, or use the setup guide or the Judge card in Settings.
 
 | Setting | What it does |
 |---|---|

@@ -31,6 +31,8 @@ export type Pick = {
   by: 'jev' | 'haiku' | 'manual' | 'named' | 'rule' | 'phase'
   /** How sure the judge was of the effort, 0-1, when it said. */
   sure?: number
+  /** Jev only: the lowest effort its Nouls allow (carrying on, a lookup). The lean (effortBias) never goes below it. */
+  least?: Effort
   /** Haiku only: why a handoff would suit now (a few words), when it said it would. */
   handoff?: string
 }
