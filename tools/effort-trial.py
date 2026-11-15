@@ -70,9 +70,11 @@ def scan(root, since, until):
                         sent[d.get('id')] = (p.get('model', '?'), (p.get('output_config') or {}).get('effort') or 'none')
                         if turns:
                             turns[-1].append(sent[d.get('id')][1])
-                        if who == 'main' and last and (pending or last != sent[d.get('id')][1]):
-                            breaks[pending or NO_BREAK][(sent[d.get('id')][0], last, sent[d.get('id')][1])] += 1
-                        pending, last = None, sent[d.get('id')][1]
+                        model, effort = sent[d.get('id')]
+                        # A request on another model (a compaction's summary, a routed prompt) is not compared.
+                        if who == 'main' and last and last[0] == model and (pending or last[1] != effort):
+                            breaks[pending or NO_BREAK][(model, last[1], effort)] += 1
+                        pending, last, calls = None, (model, effort), {}
                     elif d.get('type') == 'assistant' and d.get('requestRef'):
                         usage.setdefault(d['requestRef'], (d.get('message') or {}).get('usage') or {})
                         content = (d.get('message') or {}).get('content')
@@ -87,8 +89,9 @@ def scan(root, since, until):
                     elif d.get('type') == 'user' and isinstance((d.get('message') or {}).get('content'), list):
                         # A failed or refused Skill or ToolSearch call is no break.
                         for block in d['message']['content']:
-                            if isinstance(block, dict) and block.get('is_error') and calls.get(block.get('tool_use_id')) == pending:
-                                pending = None
+                            if isinstance(block, dict) and block.get('is_error') and calls.pop(block.get('tool_use_id'), None):
+                                # The break stands while another break call of this step succeeded or is still open.
+                                pending = next(iter(calls.values()), None) if pending in BREAK_TOOLS.values() else pending
                     elif (who == 'main' and d.get('type') == 'user' and inside(ts, since, until)
                           and (d.get('origin') or {}).get('kind') == 'human'):
                         # typed (or a suggestion accepted): at the prompt between turns; queued: typed while a turn ran.

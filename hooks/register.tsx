@@ -586,10 +586,10 @@ async function skillJoined($: EngineInterface, skill: string, effort: Effort | n
   }
   const next = phaseOf(config.phases, skill)
   if (!next) return
-  if (phaseNow && phaseNow !== next) void proof($, `skill ${skill}: the ${phaseNow.name} phase ends`)
+  if (phaseNow && phaseNow.name !== next.name) void proof($, `skill ${skill}: the ${phaseNow.name} phase ends`)
   phaseNow = next
   // A level named for this turn (in its message or typed during it) still wins; the phase takes the next turn.
-  if (turnBusy() && (await read($, pick))?.by === 'named') {
+  if (turnBusy() && namedThisTurn) {
     void proof($, `skill ${skill}: the ${next.name} phase from the next message; this turn keeps the level you named`)
     return
   }
@@ -1246,10 +1246,13 @@ let phaseNow: Phase | null = null
 let skillHold: Effort | null = null
 // A skill with its own effort loaded in this turn: the app's effort reads the skill's until the turn ends, even after a
 // later skill without one.
+// shortcut: an effort the person sets in the app during such a turn is seen only from the next turn.
 let heldThisTurn = false
+// A level was named for the running turn (in its message, or typed during it): a table skill loaded in it waits.
+let namedThisTurn = false
 // Main-chat Skill tool calls loading their skill now (skill.prompt also fires for a skill a subagent loads).
-// shortcut: a subagent's skill expanded while a main Skill call of the same name runs counts as the main one; tell them
-// apart once skill.prompt carries an agent id.
+// shortcut: a subagent's skill expanded while a main Skill call of the same name runs counts as the main one, and two
+// main calls of one bare name share an entry; tell them apart once skill.prompt carries an agent or call id.
 let mainSkillLoading = 0
 // The skill a message typed "/name" between turns runs, until its skill.prompt arrives or the turn's first request.
 // shortcut: a /name typed mid-turn is not followed; it runs as a turn of its own, after this one.
@@ -2323,6 +2326,7 @@ async function toggleAutoEffort($: EngineInterface) {
 
 async function choose($: EngineInterface, next: Pick | null) {
   pickCarried = false
+  if (next?.by === 'named') namedThisTurn = true
   // A pick made between turns (a click, a model switch) is what the footer shows next; during a turn it stays on the
   // effort that turn went out at.
   if (!turnBusy()) sentNow = undefined
@@ -4005,6 +4009,8 @@ export const register: Register = (on, options) => {
     // A phase is this chat's: a new one (or /clear) starts with none.
     phaseNow = null
     skillHold = null
+    heldThisTurn = false
+    namedThisTurn = false
     // Everything the first draw needs, asked for at once: one after the other they held the start (and with it the
     // band) for a second or more. What the draw does not need runs after, unawaited.
     const [sid, kept, kff, storedAuto, storedAutoModel, storedPick, setupDone] = await Promise.all([
@@ -4082,6 +4088,7 @@ export const register: Register = (on, options) => {
       // A skill's own effort lasts its turn (measured); the app's own comes back with the next.
       skillHold = null
       heldThisTurn = false
+      namedThisTurn = false
     }
     // The newest reply's text: its last block carries the warning card (see AssistantMessage).
     if (!e.agentId && e.reason === 'answer') await update($, lastAnswer, () => e.answer.trim())
@@ -4690,15 +4697,16 @@ Saved to ${out}.md and .json` }
       const name = String((e as { skill?: unknown }).skill ?? '')
       mainSkillLoading++
       let result
+      let own: Effort | null = null
       try {
         result = await next(e)
       } finally {
         mainSkillLoading--
+        own = loadedSkills.get(bareSkill(name)) ?? null
+        loadedSkills.delete(bareSkill(name))
       }
       // A forked skill (context: fork) runs in a subagent: its text never joins this chat, so the turn's effort holds.
       const forked = (result.result as { status?: string } | undefined)?.status === 'forked'
-      const own = loadedSkills.get(bareSkill(name)) ?? null
-      loadedSkills.delete(bareSkill(name))
       if (!('deny' in result && result.deny) && !result.isError && !forked) await skillJoined($, name, own).catch(() => undefined)
       return result
     }
