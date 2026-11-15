@@ -1,6 +1,6 @@
 # effortless フォーク版 本番導入手順書（1週間の試用）
 
-GigiTiti-Kai/effortless の main（effort 自動切替 2a）を、普段使いの Claude Code（`/home/hadas/.claude`）に入れて1週間試すための手順。止め方と元に戻す方法は [rollback.md](rollback.md) にある。
+GigiTiti-Kai/effortless の main（effort 自動切替 2a と、区切りでの当て直し・段階の表 EFR-6）を、普段使いの Claude Code（`/home/hadas/.claude`）に入れて1週間試すための手順。止め方と元に戻す方法は [rollback.md](rollback.md) にある。
 
 ## まず覚えること
 
@@ -117,10 +117,10 @@ claude plugin install effortless@effortless-fork
 4. 今回の修正が入っているか確かめる
 
    ```bash
-   grep -c "e.tool === 'Skill'" /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/hooks/register.tsx
+   grep -c "breakSince = 'toolsearch'" /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/hooks/register.tsx
    ```
 
-   `1` が出れば入っている。`0` なら修正の前の main が入っているので、rollback.md の「入れ直す」でやり直す。
+   `1` が出れば入っている（区切りでの当て直し、EFR-6）。`0` なら前の main が入っているので、rollback.md の「入れ直す」でやり直す。
 
 5. チャットで `/effortless debug` を打つ。出力に `model: always the chat's` があれば、安いモデルへの振り分けは off
 
@@ -149,6 +149,14 @@ python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tool
 
 日付は UTC で、試用した週に合わせて変える。比べるために、入れる前の週でも同じように回す。
 
+日の途中で版を入れ替えたときは、`--since` と `--until` に時刻まで書くと、その時刻で分けられる（UTC、`--until` はその時刻を含む）。
+
+```bash
+python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tools/effort-trial.py --since 2026-11-15T02:43 --until 2026-11-15T06:59:59
+```
+
+入れ替えの前から開いていたチャットは、閉じるか `/reload-plugins` するまで前の版で動く。時刻で分けた数字には、この分が後ろ側に混ざる。
+
 ```bash
 python3 /home/hadas/.claude/plugins/cache/effortless-fork/effortless/1.72.0/tools/effort-trial.py --since 2026-11-09 --until 2026-11-15
 ```
@@ -174,7 +182,8 @@ weighted cost in all: 553722, per typed prompt: 27686
 | --- | --- | --- |
 | 打った入力あたりの重み付きコスト | `per typed prompt` | 入れる前の週より下がっているか |
 | 送った effort の分布 | `main` 行の effort ごとの `requests` | low・medium が増え、xhigh・max が減っているか |
-| 途中で effort が変わったターン | `sent at more than one effort` | 多いほど、選んだ effort がターンの途中で効かなくなっている（途中入力、Skill の読み込みのあと） |
+| 途中で effort が変わったターン | `sent at more than one effort` | 段階のスキルで切り替えたターンも数える。下の「区切りの後」と合わせて見る |
+| 区切りの後の水準 | `the request after a break` の行 | 区切り（Skill・ToolSearch・作業中の入力）の直後の問い合わせが、直前と同じ水準（`kept`）か、変わったか（`changed: モデル 前->後 回数`）。EFR-6 の前は ToolSearch の後に `high->medium` のようにアプリの水準へ戻っていた。後は、段階のスキル（例 `low->xhigh`）と、設定欄に effort を書いたスキルの分だけ変わるはず |
 | ターン中の入力 | `while a turn ran` | 途中入力の多さ。上の指標の原因を見分けるのに使う |
 | subagent の effort | `subagent` 行 | effortless は既定で subagent を書き換えない。入れる前と同じ分布のはず |
 
@@ -189,14 +198,36 @@ weighted cost in all: 553722, per typed prompt: 27686
 | 入力 | 送られる effort |
 | --- | --- |
 | 「Use high effort」「max effort」のように水準を名指し | その水準（判定役は呼ばない） |
+| 段階の中（段階の表のスキルが読まれた後） | その段階の水準（判定役は呼ばない）。相づちも同じ |
 | 「ok」「はい」「続けて」などの相づち | セッションの effort（判定役は呼ばない）。ただし Claude の直前の返答が質問で終わっていたときは、相づちでも Haiku が決める |
 | 「ありがとう」だけ | low |
 | それ以外 | Haiku が決めた水準（約1秒待つ） |
 
-書き換えるのはターンの最初のリクエストだけ。2回目以降のリクエストは、最初の値をアプリが引き継ぐ。ただし次の場合、アプリはそのターンの残りをセッションの effort で送る。effortless は送り直さず、送られた値を表示と記録に出す。
+### 区切りと段階（EFR-6）
 
-- ターンの途中で文を打った
-- ターンの途中で Skill（スキル）が読み込まれた。普段の作業ではスキルの読み込みが多いので、この場合が多いと見込まれる。`context: fork` のスキル（subagent で動くもの）は本文がチャットに入らないので、effort は戻らない
+effortless は、選んだ effort をすべてのリクエストに付けて送る。アプリが新しい水準を受け取るのは、ターンの最初と、区切りの直後の最初のリクエストだけ（EFR-4 の実測）。区切りは次の3つ。
+
+- ターンの途中で文を打った（その文が水準を名指ししていれば、次のリクエストからその水準）
+- ターンの途中でスキルが読み込まれた。`context: fork` のスキルは本文がチャットに入らないので区切りにならない
+- ToolSearch を呼んだ（Sonnet・Opus。Fable 5.2 では区切りにならない）
+
+区切りでは、何もしなければアプリがセッションの effort に戻る。effortless が選んだ水準を当て直すので、戻らない。
+
+段階の表（設定 `phases`）は次のとおり。スキルの名前は、プラグイン名（`superpowers:`）を付けても付けなくても当たる。
+
+| 段階 | 水準 | スキル |
+| --- | --- | --- |
+| design（設計） | xhigh | brainstorming、grill-with-docs、grilling、writing-plans、plan-review-loop |
+| build（実装） | medium | executing-plans、subagent-driven-development、test-driven-development、split-exec |
+| check（確認） | high | requesting-code-review、code-review、verification-before-completion |
+
+- 表のスキルが読まれると、その場で段階の水準に切り替わる（ターンの途中でも）。段階は、次にスキルが読まれるまで、そのチャットの中で続く。表にないスキルが読まれると段階は終わり、次のメッセージから判定役に戻る
+- `/brainstorming` のように打ったときも同じ。判定役は呼ばない
+- 段階の中でも、メッセージで水準を名指しすれば（「Use low effort」）そちらが勝つ
+- Min・Max・save mode は段階の水準にもかかる
+- スキルの設定欄に `effort:` があれば、表より設定欄が勝つ。その水準がそのターンの終わりまで続き、区切りでもその水準を当て直す。段階は終わる。このとき Auto は切れない
+- 新しいチャット（`/clear` を含む）は段階なしで始まる
+- 表を変えるときは `/home/hadas/.claude/settings.json` の `pluginConfigs` → `effortless@effortless-fork` → `options` に `"phases": "design=max: brainstorming, writing-plans; build=medium: executing-plans"` のように書く（`名前=水準: スキル, スキル` を `;` で区切る）。`"phases": "off"` で段階を止める。新しいチャットから効く
 
 ### 知っておくこと
 
@@ -224,4 +255,4 @@ weighted cost in all: 553722, per typed prompt: 27686
 | effort の判断がおかしい | `/effortless debug` の出力と、3章の記録 |
 | この手順書の確認結果 | タスク EFR-2 の報告 |
 
-最終更新日: 2026-11-14
+最終更新日: 2026-11-15
