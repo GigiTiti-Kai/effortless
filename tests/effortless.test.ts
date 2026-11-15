@@ -1,7 +1,7 @@
 import { describe, expect, mock, test as baseTest } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { helperFloor, namedEffort, parsePhases, phaseOf, bareSkill, DEFAULT_PHASES, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
+import { helperFloor, namedEffort, parsePhases, phaseOf, bareSkill, DEFAULT_PHASES, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, isThanks, lastNamed, parseJevAnswer, parseJevKey, jevFloor, jevRequest, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
 import { ART_COLUMNS, artFrame, artPixel, MOVING } from '../hooks/art'
 import { isLight, lightHex, lightProps, setLight, setTheme, themedEls, themedSvg, tint, tintHex } from '../hooks/theme'
 import { importsOf, moduleLinks, moduleOf, relPath, withTouch } from '../hooks/agents'
@@ -678,13 +678,41 @@ describe('helpers', () => {
     expect(parseJevKey('OTHER=1')).toBeUndefined()
   })
 
-  test('parseJevAnswer: a sure answer wins, an unsure one keeps the current effort, junk is nothing', () => {
+  test('parseJevAnswer: Jev\'s effort stands, sure or not, raised to the Nouls\' floors; junk is nothing', () => {
     const current = { model: 'opus' as const, effort: 'high' as const, why: '', by: 'manual' as const }
+    const withNouls = (effort: string, continues: number, lookup: number) =>
+      JSON.stringify({ answers: { effort: { choice: effort, confidence: 0.9 }, continues_work: { noul: continues }, needs_lookup: { noul: lookup } } })
     expect(parseJevAnswer(jevReply('low', 0.9), current)?.effort).toBe('low')
-    expect(parseJevAnswer(jevReply('low', 0.4), current)?.effort).toBe('high')
-    expect(parseJevAnswer(jevReply('low', 0.4), null)?.effort).toBe('low')
+    expect(parseJevAnswer(jevReply('low', 0.4), current)?.effort).toBe('low')
+    expect(parseJevAnswer(withNouls('low', 0.8, 0.1), current)).toMatchObject({ effort: 'high', why: '90% sure, raised from low' })
+    expect(parseJevAnswer(withNouls('low', 0.1, 0.8), current)?.effort).toBe('medium')
+    expect(parseJevAnswer(withNouls('low', 0.49, 0.49), current)?.effort).toBe('low')
+    expect(parseJevAnswer(withNouls('xhigh', 0.9, 0.9), current)?.effort).toBe('xhigh')
+    // No model question asked: the model stays the current one.
+    expect(parseJevAnswer(withNouls('low', 0, 0), current)?.model).toBe('opus')
     expect(parseJevAnswer(jevReply('turbo'), current)).toBeUndefined()
     expect(parseJevAnswer('nope', current)).toBeUndefined()
+  })
+
+  test('jevFloor: carrying on keeps the current effort, a lookup is at least medium, 0.5 is the line', () => {
+    expect(jevFloor('low', 'high', 0.5, 0)).toBe('high')
+    expect(jevFloor('low', 'high', 0.49, 0)).toBe('low')
+    expect(jevFloor('low', 'low', 0.9, 0.5)).toBe('medium')
+    expect(jevFloor('low', undefined, 0.9, 0)).toBe('low')
+    expect(jevFloor('max', 'medium', 0.9, 0.9)).toBe('max')
+    expect(jevFloor('low', 'medium', undefined, undefined)).toBe('low')
+  })
+
+  test('jevRequest: no current_model, criteria with examples, two Nouls; the model question only when asked for', () => {
+    const current = { model: 'opus' as const, effort: 'medium' as const, why: '', by: 'manual' as const }
+    const body = jevRequest('次のやつも頼む', current, 'user: x', false)
+    expect(Object.keys(body.state)).toEqual(['task', 'current_effort', 'recent_conversation', 'next_message'])
+    expect(body.state.task).not.toContain('one step lower on Opus')
+    expect(body.state.task).not.toContain('needs no tools is low')
+    expect(Object.keys(body.questions)).toEqual(['effort', 'continues_work', 'needs_lookup'])
+    expect(body.questions.effort.criteria.medium.examples).toContain('Is the staging DB still on the old schema?')
+    expect(body.questions.continues_work.type).toBe('noul')
+    expect(Object.keys(jevRequest('x', current, '', true).questions)).toEqual(['effort', 'model', 'continues_work', 'needs_lookup'])
   })
 })
 
@@ -1293,7 +1321,7 @@ describe('model-aware effort', () => {
     expect(seen[0].system).toContain('Opus at medium does about what Sonnet does at high')
   })
 
-  test('Jev gets the model in use and the same rule', { options: { judge: 'auto' } } as never, async ($, on) => {
+  test('Jev gets the current effort, not the model, and no rule to step down on Opus', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' }, 'claude-opus-5-5')
     mock.clock(on)
     const bodies: Record<string, any>[] = []
@@ -1302,8 +1330,10 @@ describe('model-aware effort', () => {
       return { value: { status: 200, ok: true, headers: {}, text: jevReply('medium') } }
     })
     await $.prompt.submit({ text: 'refactor the parser', wait: false, origin: { kind: 'composer' } })
-    expect(bodies[0].state.current_model).toBe('opus')
-    expect(bodies[0].state.task).toContain('Opus at medium does about what')
+    expect(bodies[0].state.current_effort).toBe('medium')
+    expect(bodies[0].state).not.toHaveProperty('current_model')
+    expect(bodies[0].questions).not.toHaveProperty('model')
+    expect(bodies[0].state.task).not.toContain('Opus at medium does about what')
   })
 })
 
@@ -1609,13 +1639,29 @@ describe('short answers to a question', () => {
     expect(asked.length).toBe(2)
   })
 
-  test('Jev unsure: Haiku makes the call', async ($, on) => {
+  test('Jev unsure: its answer stands, Haiku is not asked', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' }, 'claude-sonnet-5-5')
     mock.clock(on)
     const asked = judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: jevReply('high', 0.3, 'sonnet') } }))
+    const sent = recordSteps(on)
     await $.prompt.submit({ text: 'show me the last five commits please', wait: false, origin: { kind: 'composer' } })
-    expect(asked.length).toBe(1)
+    await step($)
+    expect(asked.length).toBe(0)
+    expect(sent[0]?.effort).toBe('high')
+  })
+
+  test('with modelAuto on, Jev is asked the model question too', { options: { judge: 'auto', modelAuto: 'on' } } as never, async ($, on) => {
+    engine(on, { TYPESAFE_API_KEY: 'k' }, 'claude-sonnet-5-5')
+    mock.clock(on)
+    judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    const bodies: Record<string, any>[] = []
+    on('http.fetch', (_$, e) => {
+      bodies.push(JSON.parse(String(e.init?.body)))
+      return { value: { status: 200, ok: true, headers: {}, text: jevReply('medium', 0.9, 'sonnet') } }
+    })
+    await $.prompt.submit({ text: 'show me the last five commits please', wait: false, origin: { kind: 'composer' } })
+    expect(bodies[0].questions.model.type).toBe('choice')
   })
 })
 
