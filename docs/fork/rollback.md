@@ -123,6 +123,12 @@ install.md 3章で `settings.json` の `env` に足した `EFFORTLESS_LOG` は�
 
 `claude plugin update` は版数（1.72.0）しか見ないので、フォークの main が進んでも入れ替わらない。新しい commit に替えるときは、外してから入れる。
 
+外すと `settings.json` の `pluginConfigs` にあった設定（例: `judge`、`handoffSkill`、`phases`）も消える（隔離した環境で確かめた）。先に控えて、入れるときに `--config` で渡す。
+
+```bash
+python3 -c "import json; print(json.load(open('/home/hadas/.claude/settings.json')).get('pluginConfigs', {}).get('effortless@effortless-fork'))"
+```
+
 ```bash
 claude plugin uninstall effortless@effortless-fork
 ```
@@ -132,8 +138,10 @@ claude plugin marketplace update effortless-fork
 ```
 
 ```bash
-claude plugin install effortless@effortless-fork
+claude plugin install effortless@effortless-fork --config judge=jev --config handoffSkill=handoff
 ```
+
+`--config` には、控えた `options` の中身を `キー=値` で1つずつ渡す（上は例）。控えが `None` なら `--config` は要らない。
 
 入ったら install.md の「4. 入ったことを確かめる」の3と4を行う。セットアップと Auto の on/off は store に残っているので、引き継がれる。
 

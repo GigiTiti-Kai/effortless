@@ -4430,7 +4430,8 @@ Saved to ${out}.md and .json` }
         const out = goesOutAt(e.index, request.effort, request.model)
         if (e.index > 0 && breakSince) {
           const what = breakSince === 'skill' ? 'a skill was loaded' : breakSince === 'typed' ? 'a message was typed' : 'ToolSearch ran'
-          const how = out !== request.effort ? 'no break on this model' : request.effort !== e.effort ? 're-sent by effortless' : "the app's own"
+          const noBreak = breakSince === 'toolsearch' && keyOf(request.model) === 'fable'
+          const how = noBreak ? 'no break on this model' : request.effort !== e.effort ? 're-sent by effortless' : "the app's own"
           void proof($, `request ${e.index}: ${what} mid-turn, ${out ?? 'none'} goes out (${how})`)
         }
         breakSince = false

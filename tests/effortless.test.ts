@@ -3896,6 +3896,16 @@ describe('phases: a loaded skill sets the level, again after every break', () =>
     expect(r.written['/x/proof.log'] ?? '').toContain('request 1: ToolSearch ran mid-turn, low goes out (re-sent by effortless)')
   })
 
+  test('on Fable ToolSearch is no break: the log says so, and the level in force goes on', async ($, on) => {
+    const r = rig($, on, 'claude-fable-5-2')
+    await r.typed('fix the typo')
+    await r.at('t1', 0)
+    await $.tool.call({ tool: 'ToolSearch', query: 'select:Read' } as never)
+    await r.at('t1', 1)
+    expect(r.sent).toEqual(['low', 'low'])
+    expect(r.written['/x/proof.log'] ?? '').toContain('request 1: ToolSearch ran mid-turn, low goes out (no break on this model)')
+  })
+
   test('a typed table skill starts its phase with no judge; a skill a subagent loads changes nothing', async ($, on) => {
     const r = rig($, on)
     await r.typed('/brainstorming the settings page')
