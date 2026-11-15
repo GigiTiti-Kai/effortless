@@ -416,13 +416,46 @@ function lastAssistantText(messages: readonly { role: string; text: string }[]):
 }
 
 
-// Jev answers typed questions with probabilities; these are the options it picks between.
-const JEV_EFFORTS: Record<Effort, string> = {
-  low: 'quick answer, no tools, no planning',
-  medium: 'normal work: a few tool calls or edits',
-  high: 'hard or large multi-step job: many tool calls, costly mistakes',
-  xhigh: 'very hard: a long investigation',
-  max: 'the hardest research-level work',
+// Jev answers typed questions with probabilities; these are the options it picks between, each with what it is for,
+// what it is not for and examples (EFR-5 plan 3: on made-up cases 98/98 against Haiku's 91/98).
+const JEV_EFFORTS: Record<Effort, { what: string; not_for: string; examples: string[] }> = {
+  low: {
+    what: 'Answerable from the message itself or from general knowledge, with no files, logs, commands or web pages to look at; thanks or a closing remark; yes or no to one small action; picking one value for one setting.',
+    not_for: 'Anything that needs looking at files, logs, running programs or the web to answer, even when the message is short or casual (that is medium or more).',
+    examples: ["Thanks, that's all for today.", "What's the difference between a list and a tuple in Python?", '「締め切り」って英語で何て言う？'],
+  },
+  medium: {
+    what: 'Normal work: a few tool calls or edits. Reading some files or a log to answer, checking a status, a small edit in one or two files, explaining how something in this project works after looking it up.',
+    not_for: 'A question answerable from memory with no tools (low); a job across many files, an unclear failure to debug, or a design decision (high).',
+    examples: ['設定ファイルの読み込み順がどうなってるか、コードを見て教えて', 'Add a --verbose flag to the CLI script in tools/.', 'このプロジェクトのテストってどうやって走らせるの？調べて教えて', 'Is the staging DB still on the old schema?'],
+  },
+  high: {
+    what: 'A hard or large multi-step job where mistakes are costly: debugging a failure whose cause is unknown, changes across many files, a migration or design plan, a careful review.',
+    not_for: 'A lookup, a status check or a small edit (medium); a long open-ended investigation with many unknowns (xhigh).',
+    examples: ['Split the 3,000-line server.js into modules without changing behavior, and keep the tests green.', 'このPRをマージ前にセキュリティの観点でレビューして', "Why did sign-ups drop after Tuesday's release?"],
+  },
+  xhigh: {
+    what: 'Very hard: a long investigation or research with many unknowns, the architecture of a whole system, or a problem earlier attempts failed to solve.',
+    not_for: 'A large but straightforward change or a normal review (high).',
+    examples: ["We've tried three times to fix the race condition in the job queue; dig until you find the root cause.", '端末をまたいでオフラインでも編集できるように、データの持ち方と同期の仕組みを設計して'],
+  },
+  max: {
+    what: 'The hardest research-level work, or the person explicitly asks for the deepest possible effort.',
+    not_for: 'Very hard engineering work that a long investigation can finish (xhigh).',
+    examples: ['Prove or disprove that this consensus algorithm stays safe under network partitions, with a full argument.'],
+  },
+}
+const JEV_EFFORT_FOCUS = 'Judge how much looking things up, tool use and planning the request needs, not how long or casual the message is.'
+// Two judgments code turns into floors (jevFloor): Jev keeps rules that read the state ("keep the current effort") badly.
+const JEV_NOULS = {
+  continues_work: {
+    type: 'noul',
+    instructions: 'Does next_message continue, correct, redirect or push back on work the assistant is doing or just delivered? False for an unrelated new request and for thanks or a closing remark.',
+  },
+  needs_lookup: {
+    type: 'noul',
+    instructions: 'To respond well, must the assistant look at something outside the message: files, code, logs, command output, the web?',
+  },
 }
 const JEV_MODELS: Record<ModelKey, string> = {
   haiku: 'trivial questions, lookups, renames, chit-chat',
@@ -434,13 +467,11 @@ const JEV_TASK =
   'Choose the reasoning effort (and model) an agentic assistant should use for the next user message. It reads files, ' +
   'runs tools and edits things, not only code. Pick the cheapest that still does the job well. Judge the scope and the ' +
   'amount of work, not whether it is code: "go through my whole drive and clean it up" is a big tool-heavy job. ' +
-  'Effort is relative to current_model: a stronger model needs less for the same job. Opus at medium does about what ' +
-  'Sonnet does at high, so for one task pick one step lower on Opus than on Sonnet. ' +
-  'A short follow-up ("yes", "go", "ok", in any language) keeps the current effort. When the message answers a ' +
+  'When the message answers a ' +
   "question in the assistant's last reply (picks an option), judge only the work that answer starts, not its length and " +
   'not the work before the question: yes/no to one small action, or picking a value for one setting (a log level, a colour), is low; picking which way to build something starts that build, so judge the build; ' +
-  'approving a whole plan takes the effort of that plan; a plain yes to "Then I will build X" means judge X. Pushing back on or adding to a plan under discussion continues that work: keep its effort, never low. Thanks or a closing remark with no new request is low. A ' +
-  'question about how to do something that needs no tools is low. "think hard", "ultrathink" or "be thorough" means ' +
+  'approving a whole plan takes the effort of that plan; a plain yes to "Then I will build X" means judge X. Thanks or a closing remark with no new request is low. ' +
+  '"think hard", "ultrathink" or "be thorough" means ' +
   'at least high; "quick question" means low.'
 
 /** The skill or custom command a typed "/name args" runs, or nothing for the app's own commands and effortless's. */
@@ -544,7 +575,7 @@ export function keepsEffort(message: string, context: string): boolean {
 /** The pick a verdict makes, within the person's slider, Min, Max and save mode. */
 async function followVerdict($: EngineInterface, verdict: Pick, inUse: ModelKey) {
   const saving = (await read($, saveUntil)) !== null
-  const leaned = bounded(tipped(verdict.effort, verdict.sure, config.bias), config.floor, config.ceiling)
+  const leaned = bounded(leanedVerdict(verdict, config.bias), config.floor, config.ceiling)
   const effort = capped(leaned, saving)
   const why = effort !== leaned ? 'save mode' : leaned !== verdict.effort ? 'your settings' : verdict.why
   await choose($, { ...verdict, model: inUse, effort, why })
@@ -638,11 +669,25 @@ export function parseJevKey(text: string): string | undefined {
 }
 
 /**
- * Jev's answer as a verdict. Below even odds on the effort it is unsure, and an unsure call keeps the
- * current effort: that is what a "go" between two steps of work should do.
+ * The floors the two Nouls set (at 0.5 or more): carrying on with work under way keeps at least the current
+ * effort, and a message that needs looking things up gets at least medium.
  */
-const UNSURE = 'unsure, keeping'
-export function parseJevAnswer(text: string, current: Pick | null): { model: ModelKey; effort: Effort; why: string; sure?: number } | undefined {
+export function jevFloor(effort: Effort, current: Effort | undefined, continuesWork?: number, needsLookup?: number): Effort {
+  const at = (e: Effort) => EFFORTS.indexOf(e)
+  let floor: Effort = 'low'
+  if (typeof needsLookup === 'number' && needsLookup >= 0.5) floor = 'medium'
+  if (current && typeof continuesWork === 'number' && continuesWork >= 0.5 && at(current) > at(floor)) floor = current
+  return at(effort) < at(floor) ? floor : effort
+}
+
+/** The verdict's effort leaned by the person's effortBias, never below the floor Jev's Nouls set. */
+export function leanedVerdict(verdict: Pick, bias: number): Effort {
+  const leaned = tipped(verdict.effort, verdict.sure, bias)
+  return verdict.least && EFFORTS.indexOf(leaned) < EFFORTS.indexOf(verdict.least) ? verdict.least : leaned
+}
+
+/** Jev's answer as a verdict: its effort raised to the Nouls' floors, which it keeps as least. The model is Jev's only when it was asked. */
+export function parseJevAnswer(text: string, current: Pick | null): { model: ModelKey; effort: Effort; why: string; sure?: number; least?: Effort } | undefined {
   let json: Record<string, unknown>
   try {
     json = JSON.parse(text)
@@ -650,15 +695,19 @@ export function parseJevAnswer(text: string, current: Pick | null): { model: Mod
     return undefined
   }
   const answers = (json.answers ?? (json.result as Record<string, unknown> | undefined)?.answers) as
-    | Record<string, { choice?: string; confidence?: number; probabilities?: Record<string, number> }>
+    | Record<string, { choice?: string; confidence?: number; probabilities?: Record<string, number>; noul?: number }>
     | undefined
-  const effort = answers?.effort?.choice as Effort | undefined
-  if (!effort || !EFFORTS.includes(effort)) return undefined
+  const chosen = answers?.effort?.choice as Effort | undefined
+  if (!chosen || !EFFORTS.includes(chosen)) return undefined
   const model = MODELS.find(m => m.key === answers?.model?.choice)?.key ?? current?.model ?? 'sonnet'
-  const sure = answers?.effort?.confidence ?? answers?.effort?.probabilities?.[effort]
-  if (current && typeof sure === 'number' && sure < 0.5) return { model, effort: current.effort, why: UNSURE, sure }
-  if (typeof sure !== 'number') return { model, effort, why: '' }
-  return { model, effort, why: `${Math.round(sure * 100)}% sure`, sure }
+  const sure = answers?.effort?.confidence ?? answers?.effort?.probabilities?.[chosen]
+  const least = jevFloor('low', current?.effort, answers?.continues_work?.noul, answers?.needs_lookup?.noul)
+  const floored = least !== 'low' ? { least } : {}
+  const effort = EFFORTS.indexOf(chosen) < EFFORTS.indexOf(least) ? least : chosen
+  // A raised level carries no sure: the odds were for Jev's own pick.
+  if (effort !== chosen) return { model, effort, why: `raised from ${chosen}`, ...floored }
+  if (typeof sure !== 'number') return { model, effort, why: '', ...floored }
+  return { model, effort, why: `${Math.round(sure * 100)}% sure`, sure, ...floored }
 }
 
 let askJevFile: EnvAsk | undefined
@@ -849,7 +898,8 @@ function judgeQuestion(prompt: string, current: Pick | null, context: string): s
 
 /**
  * Haiku always judges; Jev is the optional quick one. Jev is asked first when a TypeSafe key is found (unless the
- * setting is haiku), and Haiku makes the call whenever Jev is unsure, down or slow. Any judge that fails or takes longer than JEV_TIMEOUT_MS falls back to
+ * setting is haiku), and Haiku makes the call only when Jev is down or slow: sending its unsure calls to Haiku scored
+ * the same or lower (EFR-5). Any judge that fails or takes longer than JEV_TIMEOUT_MS falls back to
  * Haiku, which needs nothing but the session's own login. Never throws.
  */
 async function judge($: EngineInterface, prompt: string, current: Pick | null): Promise<Judged> {
@@ -857,39 +907,37 @@ async function judge($: EngineInterface, prompt: string, current: Pick | null): 
   const key = config.judge !== 'haiku' ? await jevKey($).catch(() => undefined) : undefined
   if (key) {
     const jev = await askJev($, key, prompt, current, context)
-    if (jev) return jev.verdict?.why === UNSURE ? haikuAfter($, jev, prompt, current, context) : jev
+    if (jev) return jev
   }
   return askHaiku($, prompt, current, context)
 }
 
-/** Jev was unsure: Haiku makes the call, and both judges' tokens count. */
-async function haikuAfter($: EngineInterface, jev: Judged, prompt: string, current: Pick | null, context: string): Promise<Judged> {
-  const haiku = await askHaiku($, prompt, current, context)
-  return haiku.verdict ? { verdict: haiku.verdict, tokens: haiku.tokens + jev.tokens } : jev
+/**
+ * What effortless sends Jev. No current_model and no model question unless a model may be picked or suggested: the
+ * model sat beside "one step lower on Opus" and pulled efforts down (EFR-5).
+ */
+export function jevRequest(prompt: string, current: Pick | null, context: string, withModel: boolean) {
+  return {
+    model: 'jev-latest',
+    state: { task: JEV_TASK, current_effort: current?.effort ?? null, recent_conversation: context, next_message: prompt.slice(0, 4000) },
+    questions: {
+      effort: { type: 'choice', instructions: { question: 'Which effort fits the next message?', focus: JEV_EFFORT_FOCUS }, criteria: JEV_EFFORTS },
+      ...(withModel ? { model: { type: 'choice', instructions: 'Which model fits the next message?', criteria: JEV_MODELS } } : {}),
+      ...JEV_NOULS,
+    },
+  }
 }
 
 /** Jev on TypeSafe: an answer, or nothing when it fails, is unsure of its own format or takes too long. */
 async function askJev($: EngineInterface, key: string, prompt: string, current: Pick | null, context: string): Promise<Judged | undefined> {
   try {
+    const withModel = config.modelAuto === 'on' || (await read($, isAutoModel))
     // A stalled endpoint must not hold the prompt: after JEV_TIMEOUT_MS the judge falls through to Haiku.
     const res = await Promise.race([
       $.http.fetch((await envJevUrl($)) ?? JEV_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-          model: 'jev-latest',
-          state: {
-            task: JEV_TASK,
-            current_model: current?.model ?? null,
-            current_effort: current?.effort ?? null,
-            recent_conversation: context,
-            next_message: prompt.slice(0, 4000),
-          },
-          questions: {
-            effort: { type: 'choice', instructions: 'Which effort fits the next message?', criteria: JEV_EFFORTS },
-            model: { type: 'choice', instructions: 'Which model fits the next message?', criteria: JEV_MODELS },
-          },
-        }),
+        body: JSON.stringify(jevRequest(prompt, current, context, withModel)),
       }),
       $.clock.sleep(JEV_TIMEOUT_MS).then(() => {
         throw new Error('jev timeout')
@@ -925,8 +973,7 @@ const JUDGE_TEST_PROMPT = 'rename one variable in a single file'
 async function testJudge($: EngineInterface, judgeKind: string, draftKey: string): Promise<{ ok: boolean; text: string }> {
   const start = await $.clock.now()
   const took = async () => `${(((await $.clock.now()) - start) / 1000).toFixed(1)} s`
-  const said = (name: string, j: Judged | undefined) =>
-    j?.verdict?.why === UNSURE ? `${name} answered, unsure on the sample` : `${name} answered: ${j?.verdict?.effort}`
+  const said = (name: string, j: Judged | undefined) => `${name} answered: ${j?.verdict?.effort}`
   judgeTesting = {}
   try {
     if (judgeKind === 'jev' || judgeKind === 'auto') {
@@ -1125,8 +1172,7 @@ async function runBench($: EngineInterface, cases: BenchCase[]): Promise<BenchAn
       'jev',
       async c => {
         const jev = await askJev($, key, c.message, c.current, c.context ?? '')
-        if (!jev) return askHaiku($, c.message, c.current, c.context ?? '')
-        return jev.verdict?.why === UNSURE ? haikuAfter($, jev, c.message, c.current, c.context ?? '') : jev
+        return jev ?? askHaiku($, c.message, c.current, c.context ?? '')
       },
     ])
   const answers: BenchAnswer[] = []
@@ -3845,9 +3891,9 @@ export function helperFloor(floor: Effort, ceiling: Effort): Effort {
 /** The judge's effort for a subagent's task, within the person's slider, Min and Max and save mode; null without a verdict. */
 async function helperEffort($: EngineInterface, prompt: string, type: string): Promise<Pick | null> {
   const { verdict } = await judge($, helperQuestion(prompt, type), null)
-  if (!verdict || verdict.why === UNSURE) return null
+  if (!verdict) return null
   const saving = (await read($, saveUntil)) !== null
-  const leaned = tipped(verdict.effort, verdict.sure, config.bias)
+  const leaned = leanedVerdict(verdict, config.bias)
   const effort = capped(bounded(leaned, helperFloor(config.floor, config.ceiling), config.ceiling), saving)
   return { ...verdict, effort, why: effort !== leaned && EFFORTS.indexOf(leaned) < EFFORTS.indexOf(effort) ? `${verdict.why} (helpers start at medium)` : verdict.why }
 }
