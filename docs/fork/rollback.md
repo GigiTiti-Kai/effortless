@@ -78,13 +78,14 @@ claude plugin marketplace remove effortless-fork
 | `/home/hadas/.claude/plugins/data/effortless-release-check/` | 上流の新版を調べるための小さな git フォルダ |
 | `/home/hadas/.claude/plugins/cache/effortless-fork/` | インストールしたコピー（Claude Code が後で片付けることがある） |
 | `/home/hadas/.claude/effortless-render-*.log` | チャットごとの描画の記録 |
+| `/home/hadas/.claude/effortless-applied-*.json` | チャットごとに、最後に送った effort と自動か手動か（install.md「ステータスライン用の state」） |
 | `/home/hadas/.claude/effortless-proof.log` | install.md 3章の記録（有効にした場合） |
 | `/home/hadas/.config/jev/.env` | セットアップや Judge のカードで Jev のキーを貼った場合だけ。キーが平文で入っている |
 
 消す前に一覧を見る。
 
 ```bash
-ls -d /home/hadas/.claude/plugins/store/effortless_effortless-fork-*.json /home/hadas/.claude/plugins/data/effortless-release-check /home/hadas/.claude/plugins/cache/effortless-fork /home/hadas/.claude/effortless-render-*.log /home/hadas/.claude/effortless-proof.log 2>/dev/null
+ls -d /home/hadas/.claude/plugins/store/effortless_effortless-fork-*.json /home/hadas/.claude/plugins/data/effortless-release-check /home/hadas/.claude/plugins/cache/effortless-fork /home/hadas/.claude/effortless-render-*.log /home/hadas/.claude/effortless-applied-*.json /home/hadas/.claude/effortless-proof.log 2>/dev/null
 ```
 
 install.md 3章で `settings.json` の `env` に足した `EFFORTLESS_LOG` は、アンインストールでは消えない。手で消す。

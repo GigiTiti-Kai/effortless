@@ -1276,6 +1276,28 @@ let lastRequest: { index: number; appModel: string; appEffort: unknown; model: s
 // re-sends its pick on every request (one between breaks is ignored, harmlessly). The footer and the logs show this, not
 // the pick. It stays after the turn ends, and is cleared by the next message or by a new pick made between turns (choose).
 let sentNow: Effort | undefined
+// Who set the level sentNow holds: a pick's own `by`, 'skill' for a skill's own effort, 'app' when the app's went out.
+type AppliedBy = Pick['by'] | 'skill' | 'app'
+let sentBy: AppliedBy | undefined
+const AUTO_BY: readonly AppliedBy[] = ['jev', 'haiku', 'rule', 'phase']
+let appliedWritten = ''
+/**
+ * The effort this chat's main requests go out at, and whether Auto set it, for a status line to show:
+ * ~/.claude/effortless-applied-<session id>.json, {session_id, effort, auto, by, at}. Written only when it changes; a
+ * write that fails is dropped (and tried again on the next request).
+ */
+async function writeApplied($: EngineInterface, effort: Effort | undefined, by: AppliedBy) {
+  const [sid, home] = await Promise.all([$.session.id().catch(() => ''), homeDir($)])
+  // The id names the file: anything but a plain id is not written.
+  if (!home || !/^[\w-]+$/.test(String(sid))) return
+  const state = { session_id: String(sid), effort: effort ?? null, auto: AUTO_BY.includes(by), by }
+  const key = JSON.stringify(state)
+  if (key === appliedWritten) return
+  appliedWritten = key
+  await $.fs.write(`${home}/.claude/effortless-applied-${sid}.json`, JSON.stringify({ ...state, at: Math.floor(Date.now() / 1000) }) + '\n').catch(() => {
+    appliedWritten = ''
+  })
+}
 // The break since the last main-chat request, if any (see sentNow). A forked skill runs apart and is none (measured).
 let breakSince: false | 'typed' | 'skill' | 'toolsearch' = false
 /** The effort a main-chat request carrying `carried` goes out at (see sentNow). */
@@ -4470,10 +4492,12 @@ Saved to ${out}.md and .json` }
 
   on('turn.step', async function* ($, e, next) {
     // Every main-conversation response, whatever its effort, keeps the cache warm for its lifetime from now.
-    const send = async function* (request: typeof e) {
+    const send = async function* (request: typeof e, by: AppliedBy = 'app') {
       if (e.agentId === undefined) {
         // Between breaks a request goes out at the level in force, whatever it carries; after one, at what it carries.
         const out = goesOutAt(e.index, request.effort, request.model)
+        // A request that keeps the level in force keeps who set it.
+        if (!(e.index > 0 && out === sentNow && sentBy)) sentBy = by
         if (e.index > 0 && breakSince) {
           const what = breakSince === 'skill' ? 'a skill was loaded' : breakSince === 'typed' ? 'a message was typed' : 'ToolSearch ran'
           const noBreak = breakSince === 'toolsearch' && keyOf(request.model) === 'fable'
@@ -4485,6 +4509,7 @@ Saved to ${out}.md and .json` }
         sentByTurn.set(e.turnId, sentNow ?? null)
         lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: sentNow ?? request.effort, at: Date.now() }
         if (e.index === 0 && request.effort !== e.effort) void proof($, `request ${e.index} (${request.model}): effort ${e.effort ?? 'none'} -> ${request.effort ?? 'none'} sent`)
+        await writeApplied($, sentNow, sentBy ?? by).catch(() => undefined)
       }
       const answer = yield* next(request)
       // Inside the hook ($ calls after it returns are refused), and never allowed to break the request.
@@ -4516,7 +4541,7 @@ Saved to ${out}.md and .json` }
         void proof($, `request ${e.index}: you set effort ${seen} yourself, Auto off`)
         // The app has no event for its effort picker: this is the first request after the pick, so say it plainly.
         $.ui.toast(`effortless: Auto is off. You picked ${EFFORT_LABELS[seen as Effort] ?? seen}; turn Auto on to hand it back.`)
-        return yield* send(e)
+        return yield* send(e, 'manual')
       }
     }
     if (e.agentId === undefined && e.index === 0) {
@@ -4535,7 +4560,7 @@ Saved to ${out}.md and .json` }
     }
     // A skill that sets its own effort: that level for the rest of its turn, re-sent at each break instead of the pick.
     if (e.agentId === undefined && skillHold && !routed && typeof e.effort === 'string' && cacheSafe(e.model)) {
-      return yield* send(skillHold !== e.effort ? { ...e, effort: skillHold } : e)
+      return yield* send(skillHold !== e.effort ? { ...e, effort: skillHold } : e, 'skill')
     }
     // The judge put this prompt on a cheaper model: each of its requests goes there, at the picked effort (on the first
     // request only, like any effort change).
@@ -4546,7 +4571,7 @@ Saved to ${out}.md and .json` }
       // The same effort /effortless debug reports for this request (lastRequest, see sentNow).
       // shortcut: what a cheaper model is sent on a later request is not measured; check its transcript to be sure.
       void proof($, `request ${e.index}: ${e.model} -> ${to} at ${goesOutAt(e.index, effort, to) ?? effort ?? 'none'}`)
-      const result = yield* send({ ...e, model: to, effort })
+      const result = yield* send({ ...e, model: to, effort }, e.index === 0 && picked ? picked.by : 'app')
       if (picked && picked.by !== 'manual' && result.usage) await tally($, picked.effort, result.usage)
       return result
     }
@@ -4580,7 +4605,7 @@ Saved to ${out}.md and .json` }
     // Every request carries the pick: the first of a turn and the first after a break take it, the others keep the level
     // in force and ignore it (see sentNow). A pick equal to the app's own effort needs no rewrite at all.
     const rewrite = p.effort !== e.effort
-    const result = yield* send(rewrite ? { ...e, effort: p.effort } : e)
+    const result = yield* send(rewrite ? { ...e, effort: p.effort } : e, p.by)
     // Only requests Auto steered count, at the effort that went out.
     if (p.by !== 'manual' && result.usage && sentNow) {
       await tally($, sentNow, result.usage)

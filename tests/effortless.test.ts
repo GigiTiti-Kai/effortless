@@ -157,6 +157,35 @@ describe('auto', () => {
     expect(sent[2].effort).toBe('xhigh')
   })
 
+  test('the effort that went out and who set it are written for the status line, only when they change', async ($, on) => {
+    engine(on, { HOME: '/h' })
+    on('session.id', () => ({ value: 'sess-1' }) as never)
+    const written: { path: string; text: string }[] = []
+    let failWrite = false
+    on('fs.write', (_$, e) => {
+      if (failWrite) throw new Error('read-only')
+      written.push({ path: e.path, text: e.text })
+      return { value: undefined } as never
+    })
+    judgeSays(on, '{"model":"opus","effort":"low","why":"tiny"}')
+    const sent = recordSteps(on)
+    const applied = () => written.filter(w => w.path === '/h/.claude/effortless-applied-sess-1.json').map(w => JSON.parse(w.text))
+    await $.prompt.submit({ text: 'rename this one variable for me', wait: false, origin: { kind: 'composer' } })
+    await step($)
+    expect(applied()).toEqual([{ session_id: 'sess-1', effort: 'low', auto: true, by: 'haiku', at: expect.any(Number) }])
+    // The same level and setter again: nothing new is written.
+    await step($)
+    expect(applied().length).toBe(1)
+    // The person sets the effort in the app: theirs, not Auto's.
+    await step($, 'medium')
+    expect(applied()[1]).toMatchObject({ effort: 'medium', auto: false, by: 'manual' })
+    // A file that cannot be written never stops the request.
+    failWrite = true
+    await step($, 'xhigh')
+    expect(sent.at(-1)?.effort).toBe('xhigh')
+    expect(applied().length).toBe(2)
+  })
+
   test('routeWorth: a switch to a cold model pays only when it still comes out cheaper', () => {
     const big = 100_000
     // Opus chat, cache warm: a cold Sonnet writes the whole chat and costs more; a warm Sonnet is far cheaper.
