@@ -4496,8 +4496,9 @@ Saved to ${out}.md and .json` }
       if (e.agentId === undefined) {
         // Between breaks a request goes out at the level in force, whatever it carries; after one, at what it carries.
         const out = goesOutAt(e.index, request.effort, request.model)
-        // A request that keeps the level in force keeps who set it.
-        if (!(e.index > 0 && out === sentNow && sentBy)) sentBy = by
+        // A request that keeps the level in force (no break since the last) keeps who set it; any other takes `by`.
+        const isBreak = breakSince && !(breakSince === 'toolsearch' && keyOf(request.model) === 'fable')
+        if (!(e.index > 0 && sentNow && !isBreak && sentBy)) sentBy = by
         if (e.index > 0 && breakSince) {
           const what = breakSince === 'skill' ? 'a skill was loaded' : breakSince === 'typed' ? 'a message was typed' : 'ToolSearch ran'
           const noBreak = breakSince === 'toolsearch' && keyOf(request.model) === 'fable'
@@ -4509,7 +4510,8 @@ Saved to ${out}.md and .json` }
         sentByTurn.set(e.turnId, sentNow ?? null)
         lastRequest = { index: e.index, appModel: e.model, appEffort: e.effort, model: request.model, effort: sentNow ?? request.effort, at: Date.now() }
         if (e.index === 0 && request.effort !== e.effort) void proof($, `request ${e.index} (${request.model}): effort ${e.effort ?? 'none'} -> ${request.effort ?? 'none'} sent`)
-        await writeApplied($, sentNow, sentBy ?? by).catch(() => undefined)
+        // Haiku takes no effort, whatever the request carries.
+        await writeApplied($, keyOf(request.model) === 'haiku' ? undefined : sentNow, sentBy ?? by).catch(() => undefined)
       }
       const answer = yield* next(request)
       // Inside the hook ($ calls after it returns are refused), and never allowed to break the request.

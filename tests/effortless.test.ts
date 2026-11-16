@@ -201,14 +201,22 @@ describe('auto', () => {
   })
 
   test('a prompt the judge calls simple runs on Haiku 5.5; the next hard one is back on the chat model', { options: { modelAuto: 'on' } } as never, async ($, on) => {
-    engine(on)
+    engine(on, { HOME: '/h' })
     let verdict = '{"model":"haiku","effort":"low","why":"simple question"}'
     on('model.complete', () => ({ value: { isAnswered: true as const, text: verdict, usage: USAGE } }))
     const sent = recordSteps(on)
+    on('session.id', () => ({ value: 's3' }) as never)
+    const applied: string[] = []
+    on('fs.write', (_$, e) => {
+      if (e.path.endsWith('effortless-applied-s3.json')) applied.push(e.text)
+      return { value: undefined } as never
+    })
     await $.prompt.submit({ text: 'vad heter mappen?', wait: false, origin: { kind: 'composer' } })
     await step($)
     expect(sent[0]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
-    verdict = '{"model":"opus","effort":"high","why":"big refactor"}'
+    // Haiku takes no effort: the status line state says none.
+    expect(JSON.parse(applied.at(-1)!)).toMatchObject({ effort: null, auto: true, by: 'haiku' })
+    verdict ='{"model":"opus","effort":"high","why":"big refactor"}'
     await $.prompt.submit({ text: 'refactor the whole auth layer', wait: false, origin: { kind: 'composer' } })
     await step($)
     expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
@@ -3750,6 +3758,24 @@ describe('a message typed while a turn runs', () => {
 
     expect(asked.length).toBe(0)
     expect(sent.map(s => s.effort)).toEqual(['high', 'medium', 'low', 'high', 'medium'])
+  })
+
+  test('the same level named mid-turn is written as yours, not the judge\'s', async ($, on) => {
+    engine(on, { HOME: '/h' })
+    on('session.id', () => ({ value: 's2' }) as never)
+    const written: string[] = []
+    on('fs.write', (_$, e) => {
+      if (e.path.endsWith('effortless-applied-s2.json')) written.push(e.text)
+      return { value: undefined } as never
+    })
+    judgeSaysNow(on, { effort: 'low' })
+    recordSteps(on)
+    await $.prompt.submit({ text: 'fix the typo in the readme', wait: false, origin: { kind: 'composer' } })
+    await stepOf($, 't1', 0)
+    expect(JSON.parse(written.at(-1)!)).toMatchObject({ effort: 'low', auto: true })
+    await $.prompt.submit({ text: 'actually use low effort', wait: false, turnId: 't1', origin: { kind: 'composer' } } as never)
+    await stepOf($, 't1', 1)
+    expect(JSON.parse(written.at(-1)!)).toMatchObject({ effort: 'low', auto: false, by: 'named' })
   })
 
   test('of two levels typed mid-turn, the later one wins', async ($, on) => {
