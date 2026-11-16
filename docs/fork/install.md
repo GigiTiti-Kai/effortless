@@ -136,6 +136,25 @@ claude plugin install effortless@effortless-fork
 | subagent の分 | 同じフォルダの `<チャットID>/subagents/*.jsonl` | 同上 |
 | 判定役の判断（任意、3章） | `/home/hadas/.claude/effortless-proof.log` | 1行1件。`judged by haiku in 985 ms: …`、`request 0 (…): effort low -> high sent`、`response 1 at high: …` |
 | 帯の描画の記録 | `/home/hadas/.claude/effortless-render-<チャットID先頭8文字>.log` | チャットごとに1ファイル。effort の集計には使わない |
+| いま送っている effort（ステータスライン用） | `/home/hadas/.claude/effortless-applied-<チャットID>.json` | チャットごとに1ファイル。形は下の「ステータスライン用の state」 |
+
+### ステータスライン用の state
+
+本体のメイン会話のリクエストを送るたびに、実際に送った effort と、それを誰が決めたかを1行の JSON で書く。中身が前と同じなら書かない。書けなかったときは黙って捨て、リクエストは止めない（次のリクエストでまた書く）。`settings.json` は書かない。subagent のリクエストは書かない。
+
+```json
+{"session_id":"7f3c…","effort":"low","auto":true,"by":"jev","at":1794814304}
+```
+
+| フィールド | 中身 |
+| --- | --- |
+| `session_id` | チャットの ID。ステータスラインの入力 JSON の `session_id` と同じ値。ファイル名にも使う |
+| `effort` | そのリクエストが実際に出た effort（`low`〜`max`）。effort を持たないモデル（Haiku）では `null` |
+| `auto` | Auto が決めた値なら `true`（`by` が `jev`・`haiku`・`rule`・`phase`）。それ以外は `false` |
+| `by` | `jev`・`haiku`（判定役）、`rule`（相づち・お礼の決まり）、`phase`（段階の表）、`manual`（アプリの effort やボタンで本人が選んだ）、`named`（メッセージで水準を指定した）、`skill`（スキルの設定欄の effort）、`app`（mod は書き換えず、アプリの effort がそのまま出た。Auto off も含む） |
+| `at` | 書いた時刻（unix 秒）。値が変わったときだけ進む |
+
+ターンの途中で区切りの無いリクエストは、そのターンの水準を引き継ぐので、`by` も引き継ぐ。ステータスライン側は、`session_id` が一致したときだけこの値を使い、ファイルが無い・読めない・JSON が壊れているときは入力 JSON の `effort.level` に戻す。
 
 トランスクリプトは effortless を入れる前の分も残っているので、入れる前の1週間と比べられる。
 
