@@ -657,15 +657,15 @@ function judgePorts($: EngineInterface, key: string | undefined, judging?: () =>
     sleep: ms => $.clock.sleep(ms),
     now: () => Date.now(),
     judging,
+    warned: reason => warnJudge($, reason),
   }
 }
 
 /** The key Jev is asked with: none when the setting is haiku. */
 const judgeKey = ($: EngineInterface) => (config.judge !== 'haiku' ? jevKey($).catch(() => undefined) : Promise.resolve(undefined))
 
-/** What Jev's ask leaves for the person: a warning when it failed, and the judge-down band gone once it answers. */
-async function afterJev($: EngineInterface, warn: string | undefined, answered: boolean) {
-  if (warn) warnJudge($, warn)
+/** The judge-down band goes once Jev answers again. (A failure warns through the warned port, before Haiku is asked.) */
+async function afterJev($: EngineInterface, answered: boolean) {
   if (answered && (await read($, judgeDown))) await update($, judgeDown, () => null)
 }
 
@@ -673,7 +673,7 @@ async function afterJev($: EngineInterface, warn: string | undefined, answered: 
 async function judge($: EngineInterface, prompt: string, current: Pick | null): Promise<Judged> {
   const context = await recentContext($).catch(() => '')
   const j = await askJudges(prompt, current, context, await judgeSettings($), judgePorts($, await judgeKey($)))
-  await afterJev($, j.warn, j.verdict?.by === 'jev')
+  await afterJev($, j.verdict?.by === 'jev')
   return j
 }
 
@@ -695,7 +695,7 @@ async function testJudge($: EngineInterface, judgeKind: string, draftKey: string
       if (!key && judgeKind === 'jev') return { ok: false, text: 'No TypeSafe key found' }
       if (key) {
         const j = await askJevOnce(JUDGE_TEST_PROMPT, null, '', (await judgeSettings($)).withModel, judgePorts($, key))
-        await afterJev($, j.warn, !!j.verdict)
+        await afterJev($, !!j.verdict)
         if (j.verdict) return { ok: true, text: `${said('Jev', j)} in ${await took()}` }
         return { ok: false, text: judgeTesting.reason ?? 'Jev gave no usable answer' }
       }
@@ -885,7 +885,7 @@ async function runBench($: EngineInterface, cases: BenchCase[]): Promise<BenchAn
       'jev',
       async c => {
         const j = await askJudges(c.message, c.current, c.context ?? '', { ...(await judgeSettings($)), judge: 'jev' }, judgePorts($, key))
-        await afterJev($, j.warn, j.verdict?.by === 'jev')
+        await afterJev($, j.verdict?.by === 'jev')
         return j
       },
     ])
@@ -4112,7 +4112,7 @@ Saved to ${out}.md and .json` }
         $.ui.invalidate('ui.render')
       } else {
         const verdict = d.verdict
-        await afterJev($, d.warn, d.by === 'jev')
+        await afterJev($, d.by === 'jev')
         await endJudgeGlow($, 'verdict')
         const ms = d.event.judge?.ms ?? 0
         await countPrompt($, wantsEffort && inUse !== 'haiku' ? verdict?.effort : undefined, verdict?.by, ms, d.event.judge?.tokens ?? 0)

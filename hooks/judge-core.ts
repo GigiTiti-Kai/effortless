@@ -342,6 +342,8 @@ export type Ports = {
   now: () => number
   /** Called once, just before a judge is asked: Claude Code starts its glow here. */
   judging?: () => Promise<void>
+  /** Called as soon as Jev fails in a way to tell the person, before Haiku is asked. */
+  warned?: (reason: string) => void
 }
 
 /** What Jev said, as numbers only: the record keeps no text. */
@@ -370,6 +372,7 @@ export async function askJevOnce(message: string, current: Pick | null, context:
       }),
     ])
     const warn = res.ok ? undefined : judgeFailure('Jev', res.status)
+    if (warn) ports.warned?.(warn)
     const verdict = res.ok ? parseJevAnswer(res.text, current) : undefined
     if (!verdict) return { tokens: 0, warn, fellBack: true }
     let used = 0
@@ -381,7 +384,9 @@ export async function askJevOnce(message: string, current: Pick | null, context:
     }
     return { verdict: { ...verdict, by: 'jev' }, tokens: used, jev: jevSeen(res.text, verdict.least) }
   } catch (error) {
-    return { tokens: 0, warn: String(error).includes('timeout') ? judgeFailure('Jev', 'timeout') : 'Jev could not be reached', fellBack: true }
+    const warn = String(error).includes('timeout') ? judgeFailure('Jev', 'timeout') : 'Jev could not be reached'
+    ports.warned?.(warn)
+    return { tokens: 0, warn, fellBack: true }
   }
 }
 
@@ -499,6 +504,9 @@ export type DecisionEvent = {
   }
 }
 
+/** A level as the harness reported it: wider than Effort (Codex has ultra, and its levels are any non-empty string). */
+export type AppliedLevel = string
+
 /** What a harness saw run, written when it sees the level that took effect. */
 export type AppliedEvent = {
   v: 1
@@ -506,7 +514,7 @@ export type AppliedEvent = {
   session: string
   turn?: string
   at: number
-  applied: Effort | null
+  applied: AppliedLevel | null
   by: 'jev' | 'haiku' | 'rule' | 'phase' | 'named' | 'skill' | 'manual' | 'app'
   /** The level that ran differs from the one decided, and the person did not change it. */
   reverted?: boolean
@@ -537,8 +545,8 @@ export async function decide(input: DecisionInput, ports: Ports): Promise<Decisi
     },
   })
   if (input.rules && input.phase && !named) return made(capped(bounded(input.phase.effort, s.floor, s.ceiling), s.saving), 'phase', `${input.phase.name} phase`)
-  if (input.bare && isThanks(input.typed)) return made(ruleEffort(true, input.sessionEffort, s.floor, s.ceiling), 'rule', 'thanks')
-  if (input.bare && !input.manual && isFollowUp(input.typed) && keepsEffort(input.typed, input.context)) {
+  if (input.rules && input.bare && isThanks(input.typed)) return made(ruleEffort(true, input.sessionEffort, s.floor, s.ceiling), 'rule', 'thanks')
+  if (input.rules && input.bare && !input.manual && isFollowUp(input.typed) && keepsEffort(input.typed, input.context)) {
     return made(ruleEffort(false, input.sessionEffort, s.floor, s.ceiling), 'rule', 'a go-ahead: the session effort')
   }
   if (named) return made(named, 'named', 'you asked for it')
@@ -565,6 +573,8 @@ export type Scorecard = {
   auto: number
   /** Share of the decisions Jev was asked for that it gave none and Haiku (or nothing) stood in (0-1). */
   fellBack: number
+  /** Levels that ran, by harness, by who set them and by level as reported ('ultra' is a column of its own). */
+  applied: { harness: Harness; by: AppliedEvent['by']; level: string; n: number }[]
   /** Applied levels that differed from the decided one without the person changing it. */
   reverted: number
   /** For each level, Jev's probability for it in tenths: [0] counts 0-0.1, [9] counts 0.9-1. */
@@ -590,12 +600,21 @@ export function scorecard(events: readonly (DecisionEvent | AppliedEvent)[]): Sc
     if (d.judge?.fallback) fell++
     for (const [level, p] of Object.entries(d.judge?.jev?.p ?? {}) as [Effort, number][]) jev[level][Math.min(9, Math.floor(p * 10))]++
   }
+  const applied = new Map<string, Scorecard['applied'][number]>()
+  for (const a of events.filter((e): e is AppliedEvent => 'applied' in e)) {
+    const level = a.applied ?? 'none'
+    const key = `${a.harness}|${a.by}|${level}`
+    const row = applied.get(key) ?? { harness: a.harness, by: a.by, level, n: 0 }
+    row.n++
+    applied.set(key, row)
+  }
   const share = (n: number, of: number) => (of ? n / of : 0)
   return {
     decisions: decisions.length,
     counts: [...counts.values()],
     auto: share(auto, decisions.length),
     fellBack: share(fell, asked),
+    applied: [...applied.values()],
     reverted: events.filter(e => 'applied' in e && e.reverted).length,
     jev,
   }

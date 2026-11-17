@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { type DecisionEvent, type DecisionInput, decide, type Ports, parseVerdict, scorecard } from '../hooks/judge-core'
+import { type AppliedEvent, type DecisionEvent, type DecisionInput, decide, type Ports, parseVerdict, scorecard } from '../hooks/judge-core'
 
 // The judge core on its own: no engine, only fake ports. Jev's replies have the shape TypeSafe sends.
 const jevReply = (choice: string, confidence: number, nouls: { cont?: number; look?: number } = {}) =>
@@ -84,6 +84,17 @@ describe('judge core: Jev, then Haiku', () => {
     }
   })
 
+  test('a Jev failure is told before Haiku is asked, so a Haiku that throws does not swallow it', async () => {
+    const { p } = ports({ ok: false, status: 402, text: 'payment required' })
+    const told: string[] = []
+    p.warned = reason => told.push(reason)
+    p.askHaiku = async () => {
+      throw new Error('haiku down')
+    }
+    await expect(decide(input(), p)).rejects.toThrow('haiku down')
+    expect(told).toEqual(['Jev is out of credits (402)'])
+  })
+
   test('with the haiku setting or no way to reach Jev, Jev is not asked; no verdict changes nothing', async () => {
     const haikuSet = ports(ok(jevReply('low', 0.9)))
     await decide(input({ settings: { ...input().settings, judge: 'haiku' } }), haikuSet.p)
@@ -154,11 +165,21 @@ describe('judge core: the rules before the judge', () => {
     expect(asked.jev).toBe(0)
     expect((await decide(input({ typed: 'yes', context: 'assistant: Should I rebuild the index?' }), p)).by).toBe('jev')
     expect((await decide(input({ typed: 'ok', manual: true, sessionEffort: 'low' }), p)).by).toBe('jev')
+    // The same 'go' (b9ec423 register.tsx:4396): after a pick by hand it is judged; after Jev's it keeps medium by rule.
+    const same = { typed: 'go', context: 'assistant: done.', sessionEffort: 'medium' as const, bare: true }
+    expect((await decide(input({ ...same, manual: true }), p)).by).toBe('jev')
+    expect([(await decide(input({ ...same, manual: false }), p)).by, (await decide(input({ ...same, manual: false }), p)).effort]).toEqual(['rule', 'medium'])
   })
 
   test('without rules (Auto off for effort, a slash command) or for a message that carries more, the judge decides', async () => {
     const { p } = ports(ok(jevReply('high', 0.9)))
     expect((await decide(input({ typed: 'thanks', rules: false, bare: false }), p)).by).toBe('jev')
+    // rules off wins even for a bare message: thanks and a go-ahead go to the judge, which is asked for a model too.
+    const withModel = { ...input().settings, withModel: true }
+    for (const typed of ['thanks', 'go']) {
+      const d = await decide(input({ typed, rules: false, bare: true, sessionEffort: 'medium', settings: withModel }), p)
+      expect([d.by, d.model]).toEqual(['jev', 'opus'])
+    }
     expect((await decide(input({ typed: 'thanks', bare: false }), p)).by).toBe('jev')
     expect((await decide(input({ typed: 'max effort', rules: false, bare: false }), p)).effort).toBe('high')
   })
@@ -181,6 +202,8 @@ describe('judge core: the record', () => {
   test('the scorecard counts by harness, decider and level, the automatic share, Haiku standing in, reverts and Jev odds', async () => {
     const at = { v: 1, session: 's', at: 0 } as const
     const jevAt = (p: number): DecisionEvent => ({ ...at, harness: 'codex', decided: 'high', by: 'jev', auto: true, judge: { jev: { choice: 'high', p: { max: p } }, ms: 1, tokens: 1 } })
+    // Codex reports ultra, past the core's five levels: the record keeps it and the scorecard counts it as its own column.
+    const ultra: AppliedEvent = { ...at, harness: 'codex', applied: 'ultra', by: 'manual' }
     const card = scorecard([
       jevAt(0.0),
       jevAt(1.0),
@@ -188,11 +211,15 @@ describe('judge core: the record', () => {
       { ...at, harness: 'claude-code', decided: 'max', by: 'named', auto: false },
       { ...at, harness: 'codex', applied: 'low', by: 'app', reverted: true },
       { ...at, harness: 'codex', applied: 'high', by: 'jev' },
+      ultra,
+      ultra,
     ])
     expect(card.decisions).toBe(4)
     expect(card.counts).toContainEqual({ harness: 'codex', by: 'jev', effort: 'high', n: 2 })
     expect(card.counts).toContainEqual({ harness: 'claude-code', by: 'named', effort: 'max', n: 1 })
     expect([card.auto, card.reverted]).toEqual([0.75, 1])
+    expect(card.applied).toContainEqual({ harness: 'codex', by: 'manual', level: 'ultra', n: 2 })
+    expect(card.applied).toContainEqual({ harness: 'codex', by: 'jev', level: 'high', n: 1 })
     expect(Math.round(card.fellBack * 1000)).toBe(333)
     expect([card.jev.max[0], card.jev.max[9], card.jev.high[0]]).toEqual([1, 1, 0])
   })
