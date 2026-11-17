@@ -8,9 +8,9 @@ import { MARK_SVG } from './brand-mark'
 import { accent, setLight, setTheme, themedEls, type ThemeName, THEMES, tintHex } from './theme'
 import { PILL_H, stepsFromTodos, thinkingSvg, THINK_W, withTaskCreated, withTaskUpdated } from './progress'
 import {
-  bounded, capped, carriesWork, contextFrom, EFFORTS, endsOnQuestion, helperFloor, isFollowUp, isThanks, jevFloor, jevRequest, JEV_TIMEOUT_MS,
-  judgeFailure, judgeQuestion, JUDGE_SYSTEM, keepsEffort, lastAssistantText, lastNamed, leanedVerdict, namedEffort, parseJevAnswer, parseVerdict,
-  tipped, withAttachments, withCarried,
+  askHaikuOnce, askJevOnce, askJudges, bounded, capped, carriesWork, contextFrom, decide, EFFORTS, endsOnQuestion, helperFloor, isFollowUp, isThanks,
+  jevFloor, jevRequest, judgeFailure, type Judged, type JudgeSettings, keepsEffort, lastAssistantText, lastNamed, leanedVerdict, namedEffort,
+  parseJevAnswer, parseVerdict, type Ports, ruleEffort, settle, tipped, withAttachments, withCarried,
 } from './judge-core'
 
 // The judge lives in judge-core.ts; these stay importable from here, as they were.
@@ -383,32 +383,30 @@ let freshTurn = false
 
 /** The pick a verdict makes, within the person's slider, Min, Max and save mode. */
 async function followVerdict($: EngineInterface, verdict: Pick, inUse: ModelKey) {
-  const saving = (await read($, saveUntil)) !== null
-  const leaned = bounded(leanedVerdict(verdict, config.bias), config.floor, config.ceiling)
-  const effort = capped(leaned, saving)
-  const why = effort !== leaned ? 'save mode' : leaned !== verdict.effort ? 'your settings' : verdict.why
+  const { effort, why } = settle(verdict, config.bias, config.floor, config.ceiling, (await read($, saveUntil)) !== null)
   await choose($, { ...verdict, model: inUse, effort, why })
 }
 
 /** Thanks: low within Min and Max. A go-ahead: the session's own effort, so nothing is rewritten. No judge either way. */
-async function pickByRule($: EngineInterface, thanks: boolean, said: string) {
+async function pickByRule($: EngineInterface, thanks: boolean, said: string, effort = ruleEffort(thanks, sessionEffort(), config.floor, config.ceiling)) {
   const inUse = await sessionModel($)
-  const session = EFFORTS.includes(engineEffort as Effort) ? (engineEffort as Effort) : undefined
-  const effort = thanks ? bounded('low', config.floor, config.ceiling) : session
   await choose($, effort ? { model: inUse, effort, why: thanks ? 'thanks' : 'a go-ahead: the session effort', by: 'rule' } : null)
   if (routed) routed = null
   await countPrompt($, inUse !== 'haiku' ? effort : undefined, 'rule', 0, 0)
   void proof($, `${thanks ? 'thanks' : 'follow-up'} "${said.slice(0, 50)}": ${effort ?? 'the session effort (not seen yet)'} by rule, no judge`)
 }
 
+/** The session's own effort, when the engine has said it. */
+const sessionEffort = () => (EFFORTS.includes(engineEffort as Effort) ? (engineEffort as Effort) : undefined)
+
 /** The phase's level as Auto's pick, within Min, Max and save mode, as a judge's verdict is. Nothing with Auto off. */
-async function pickPhase($: EngineInterface, why: string): Promise<Effort | undefined> {
+async function pickPhase($: EngineInterface, why: string, decided?: Effort): Promise<Effort | undefined> {
   if (!phaseNow || !(await read($, isAuto))) return undefined
   // Where Auto changes no effort (Haiku, a model whose cache an effort change rewrites), nor does a phase.
   const modelId = await $.session.model().catch(() => '')
   if (keyOf(modelId) === 'haiku' || !cacheSafe(modelId)) return undefined
   const inUse = await sessionModel($)
-  const effort = capped(bounded(phaseNow.effort, config.floor, config.ceiling), (await read($, saveUntil)) !== null)
+  const effort = decided ?? capped(bounded(phaseNow.effort, config.floor, config.ceiling), (await read($, saveUntil)) !== null)
   await choose($, { model: inUse, effort, why, by: 'phase' })
   if (routed) routed = null
   return effort
@@ -494,8 +492,6 @@ async function jevKey($: EngineInterface): Promise<string | undefined> {
     })()
   return askJevFile
 }
-
-type Judged = { verdict?: Pick; tokens: number }
 
 const warned = new Set<string>()
 /** Tells the person once per session and reason that their judge failed and Haiku stands in. */
@@ -639,55 +635,46 @@ export function readConfig(options: unknown): JudgeConfig {
   }
 }
 
-/**
- * Haiku always judges; Jev is the optional quick one. Jev is asked first when a TypeSafe key is found (unless the
- * setting is haiku), and Haiku makes the call only when Jev is down or slow: sending its unsure calls to Haiku scored
- * the same or lower (EFR-5). Any judge that fails or takes longer than JEV_TIMEOUT_MS falls back to
- * Haiku, which needs nothing but the session's own login. Never throws.
- */
-async function judge($: EngineInterface, prompt: string, current: Pick | null): Promise<Judged> {
-  const context = await recentContext($).catch(() => '')
-  const key = config.judge !== 'haiku' ? await jevKey($).catch(() => undefined) : undefined
-  if (key) {
-    const jev = await askJev($, key, prompt, current, context)
-    if (jev) return jev
-  }
-  return askHaiku($, prompt, current, context)
+/** The settings a decision reads, as they are now. */
+async function judgeSettings($: EngineInterface): Promise<JudgeSettings> {
+  const saving = (await read($, saveUntil)) !== null
+  const withModel = config.modelAuto === 'on' || (await read($, isAutoModel))
+  return { judge: config.judge, bias: config.bias, floor: config.floor, ceiling: config.ceiling, saving, withModel }
 }
 
-/** Jev on TypeSafe: an answer, or nothing when it fails, is unsure of its own format or takes too long. */
-async function askJev($: EngineInterface, key: string, prompt: string, current: Pick | null, context: string): Promise<Judged | undefined> {
-  try {
-    const withModel = config.modelAuto === 'on' || (await read($, isAutoModel))
-    // A stalled endpoint must not hold the prompt: after JEV_TIMEOUT_MS the judge falls through to Haiku.
-    const res = await Promise.race([
-      $.http.fetch((await envJevUrl($)) ?? JEV_URL, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-        body: JSON.stringify(jevRequest(prompt, current, context, withModel)),
-      }),
-      $.clock.sleep(JEV_TIMEOUT_MS).then(() => {
-        throw new Error('jev timeout')
-      }),
-    ])
-    if (!res.ok) warnJudge($, judgeFailure('Jev', res.status))
-    const verdict = res.ok ? parseJevAnswer(res.text, current) : undefined
-    if (verdict) {
-      let used = 0
-      try {
-        const usage = (JSON.parse(res.text) as { usage?: { input_tokens?: number; output_tokens?: number } }).usage
-        used = (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)
-      } catch {
-        // No usage in the reply: counted as 0.
-      }
-      if (await read($, judgeDown)) await update($, judgeDown, () => null)
-      return { verdict: { ...verdict, by: 'jev' }, tokens: used }
-    }
-  } catch (error) {
-    // Jev down or slow: fall through to Haiku, and say so.
-    warnJudge($, String(error).includes('timeout') ? judgeFailure('Jev', 'timeout') : 'Jev could not be reached')
+/** How the judge reaches Jev (with this key; none: Jev is not asked) and Haiku from Claude Code. */
+function judgePorts($: EngineInterface, key: string | undefined, judging?: () => Promise<void>): Ports {
+  return {
+    askJev: key
+      ? async body =>
+          $.http.fetch((await envJevUrl($)) ?? JEV_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+            body: JSON.stringify(body),
+          })
+      : undefined,
+    askHaiku: (system, prompt) => askHaiku($, system, prompt),
+    sleep: ms => $.clock.sleep(ms),
+    now: () => Date.now(),
+    judging,
   }
-  return undefined
+}
+
+/** The key Jev is asked with: none when the setting is haiku. */
+const judgeKey = ($: EngineInterface) => (config.judge !== 'haiku' ? jevKey($).catch(() => undefined) : Promise.resolve(undefined))
+
+/** What Jev's ask leaves for the person: a warning when it failed, and the judge-down band gone once it answers. */
+async function afterJev($: EngineInterface, warn: string | undefined, answered: boolean) {
+  if (warn) warnJudge($, warn)
+  if (answered && (await read($, judgeDown))) await update($, judgeDown, () => null)
+}
+
+/** Jev, else Haiku, for a message that no rule decides (a subagent's task, messages carried from a turn). Never throws on Jev. */
+async function judge($: EngineInterface, prompt: string, current: Pick | null): Promise<Judged> {
+  const context = await recentContext($).catch(() => '')
+  const j = await askJudges(prompt, current, context, await judgeSettings($), judgePorts($, await judgeKey($)))
+  await afterJev($, j.warn, j.verdict?.by === 'jev')
+  return j
 }
 
 // Set while the settings panel tests a judge: warnJudge leaves its reason here instead of warning.
@@ -707,12 +694,13 @@ async function testJudge($: EngineInterface, judgeKind: string, draftKey: string
       const key = parseJevKey(draftKey) ?? (draftKey.trim() || undefined) ?? (await jevKey($).catch(() => undefined)) ?? (await typesafeKeyAnywhere($).catch(() => undefined))
       if (!key && judgeKind === 'jev') return { ok: false, text: 'No TypeSafe key found' }
       if (key) {
-        const j = await askJev($, key, JUDGE_TEST_PROMPT, null, '')
-        if (j?.verdict) return { ok: true, text: `${said('Jev', j)} in ${await took()}` }
+        const j = await askJevOnce(JUDGE_TEST_PROMPT, null, '', (await judgeSettings($)).withModel, judgePorts($, key))
+        await afterJev($, j.warn, !!j.verdict)
+        if (j.verdict) return { ok: true, text: `${said('Jev', j)} in ${await took()}` }
         return { ok: false, text: judgeTesting.reason ?? 'Jev gave no usable answer' }
       }
     }
-    const h = await askHaiku($, JUDGE_TEST_PROMPT, null, '')
+    const h = await askHaikuOnce(JUDGE_TEST_PROMPT, null, '', judgePorts($, undefined))
     return h.verdict ? { ok: true, text: `${said('Haiku', h)} in ${await took()}` } : { ok: false, text: 'Haiku gave no answer' }
   } catch (error) {
     return { ok: false, text: String(error).slice(0, 80) }
@@ -722,17 +710,15 @@ async function testJudge($: EngineInterface, judgeKind: string, draftKey: string
 }
 
 /** Haiku through the session's own login: the judge that needs no key, and the fallback for the others. */
-async function askHaiku($: EngineInterface, prompt: string, current: Pick | null, context: string): Promise<Judged> {
+async function askHaiku($: EngineInterface, system: string, prompt: string): Promise<{ text: string; tokens: number } | undefined> {
   const used = lastContext && lastContext.window ? `Context used: ${Math.round(lastContext.percent)}% of the window` : ''
-  const asked = [judgeQuestion(prompt, current, context), used].filter(Boolean).join('\n\n')
-  const ask = (model: string) => $.model.complete({ model, system: JUDGE_SYSTEM, prompt: asked, maxTokens: 160, effort: 'low', timeoutMs: 6000 })
+  const asked = [prompt, used].filter(Boolean).join('\n\n')
+  const ask = (model: string) => $.model.complete({ model, system, prompt: asked, maxTokens: 160, effort: 'low', timeoutMs: 6000 })
   // Haiku 5.5 by name: Claude Code builds that predate it map the plain alias to Haiku 4.5, at ten times the price.
   // Where 5.5 does not answer, the alias stands in.
   let r = await ask(COMPACT_MODEL)
   if (!r.isAnswered) r = await ask('haiku')
-  const verdict = r.isAnswered ? parseVerdict(r.text) : undefined
-  const tokens = r.isAnswered && r.usage ? r.usage.input_tokens + r.usage.output_tokens : 0
-  return { verdict: verdict && { ...verdict, by: 'haiku' }, tokens }
+  return r.isAnswered ? { text: r.text, tokens: r.usage ? r.usage.input_tokens + r.usage.output_tokens : 0 } : undefined
 }
 
 // Whether a fresh chat would now serve better than carrying on: Haiku's call, whatever judge picks the effort. It runs
@@ -892,14 +878,15 @@ export function benchReport(cases: BenchCase[], answers: BenchAnswer[]): string 
 async function runBench($: EngineInterface, cases: BenchCase[]): Promise<BenchAnswer[]> {
   const key = await typesafeKeyAnywhere($).catch(() => undefined)
   const judges: [string, (c: BenchCase) => Promise<Judged | undefined>][] = [
-    ['haiku', c => askHaiku($, c.message, c.current, c.context ?? '')],
+    ['haiku', c => askHaikuOnce(c.message, c.current, c.context ?? '', judgePorts($, undefined))],
   ]
   if (key)
     judges.push([
       'jev',
       async c => {
-        const jev = await askJev($, key, c.message, c.current, c.context ?? '')
-        return jev ?? askHaiku($, c.message, c.current, c.context ?? '')
+        const j = await askJudges(c.message, c.current, c.context ?? '', { ...(await judgeSettings($)), judge: 'jev' }, judgePorts($, key))
+        await afterJev($, j.warn, j.verdict?.by === 'jev')
+        return j
       },
     ])
   const answers: BenchAnswer[] = []
@@ -4074,109 +4061,114 @@ Saved to ${out}.md and .json` }
     // A message with an image is never a bare follow-up: "fix this" plus a screenshot is new work; nor is one with
     // messages carried from the last turn that may have steered it (carried go-aheads and thanks were dropped above).
     const bare = wantsEffort && !e.attachments?.length && !slash && !earlier.length
-    // In a phase its level runs, with no judge, unless the message names a level. A typed skill is decided as it loads.
-    if (wantsEffort && phaseNow && !slash && !(namedEffort(e.text) ?? lastNamed(earlier))) {
-      const inUse = await sessionModel($)
-      const at = await pickPhase($, `${phaseNow.name} phase`)
-      await countPrompt($, inUse !== 'haiku' ? at : undefined, 'phase', 0, 0)
-      void proof($, `the ${phaseNow.name} phase: ${at} for "${e.text.slice(0, 50)}", no judge`)
+    const inUse = await sessionModel($)
+    // The glow rises only when a judge is asked; a rule, a phase or a named level decides with none.
+    let judging = false
+    const glow = async () => {
+      judging = true
+      judgeStartedAt = await $.clock.now().catch(() => Date.now())
+      judgeEndedAt = null
+      renderLog.push(`${new Date().toISOString()} ${loadedSession} glow: start`)
+      drawGlowSteps($, 0, JUDGE_RISE_MS)
+      // The band is drawn again as the judge starts, so the rise is placed by the clock from the first frame.
       $.ui.invalidate('ui.render')
-      return next(e)
+      await update($, isJudging, () => true)
     }
-    // Thanks and nothing else: low by rule, within the person's Min and Max. No judge.
-    if (bare && isThanks(e.text)) {
-      await pickByRule($, true, e.text.trim())
-      $.ui.invalidate('ui.render')
-      return next(e)
-    }
-    // "go", "ok", "はい" between two steps of work: nothing to change, so the session's own effort goes out, with no
-    // rewrite and no judge. A level above it is kept only by naming it again.
-    if (bare && before?.by !== 'manual' && isFollowUp(e.text) && keepsEffort(e.text, await recentContext($).catch(() => ''))) {
-      await pickByRule($, false, e.text.trim())
-      $.ui.invalidate('ui.render')
-      return next(e)
-    }
-    // "max effort", "effort: low": the person said the level, so it runs, past Min, Max and save mode, and no judge is asked.
-    const named = wantsEffort && !slash ? namedEffort(e.text) ?? lastNamed(earlier) : undefined
-    if (named) {
-      const inUse = await sessionModel($)
-      await choose($, { model: inUse, effort: named, why: 'you asked for it', by: 'named' })
-      if (routed) routed = null
-      await countPrompt($, inUse !== 'haiku' ? named : undefined, 'named', 0, 0)
-      void proof($, `named level ${named} in "${e.text.slice(0, 50)}": no judge`)
-      $.ui.invalidate('ui.render')
-      return next(e)
-    }
-
-    judgeStartedAt = await $.clock.now().catch(() => Date.now())
-    judgeEndedAt = null
-    renderLog.push(`${new Date().toISOString()} ${loadedSession} glow: start`)
-    drawGlowSteps($, 0, JUDGE_RISE_MS)
-    // The band is drawn again as the judge starts, so the rise is placed by the clock from the first frame.
-    $.ui.invalidate('ui.render')
-    await update($, isJudging, () => true)
     try {
-      const inUse = await sessionModel($)
-      const startedAt = Date.now()
-      const { verdict, tokens: judgeTokens } = await judge($, shown, {
-        model: inUse,
-        effort: (await read($, pick))?.effort ?? 'medium',
-        why: '',
-        by: 'manual',
-      })
-      await endJudgeGlow($, 'verdict')
-      const ms = Date.now() - startedAt
-      await countPrompt($, wantsEffort && inUse !== 'haiku' ? verdict?.effort : undefined, verdict?.by, ms, judgeTokens)
-      void proof(
-        $,
-        verdict
-          ? `judged by ${verdict.by} in ${ms} ms: ${verdict.model}/${verdict.effort} (${verdict.why}) for "${e.text.slice(0, 50)}"`
-          : `no verdict after ${ms} ms for "${e.text.slice(0, 50)}"`,
-      )
-      $.ui.invalidate('ui.render')
-      if (verdict) {
-        // Effort follows the verdict at once, when Auto is on for effort. The model stays: switching it
-        // reloads the context, so with Auto on for model it is only suggested.
-        if (wantsEffort) await followVerdict($, verdict, inUse)
-        // A prompt the judge calls simple runs on a cheaper model.
+      // The order is judge-core's: in a phase its level runs; thanks is low; a go-ahead between two steps keeps the
+      // session's own effort; a named level runs past Min, Max and save mode; else Jev, else Haiku.
+      const d = await decide(
         {
-          let to = wantsEffort && config.modelAuto === 'on' ? routeTo(verdict.model, inUse) : null
-          // The last prompt ran on a cheaper model and this one says it was wrong: that is a miss. The retry runs on the
-          // chat's own model, and so do the next few prompts.
-          if (routed && looksLikeRedo(e.text)) {
-            stayUp = REDO_STAY_PROMPTS
-            await update($, saved, old => ({ ...asSpent(old), redone: asSpent(old).redone + 1 }))
-            void proof($, `redo after ${routed}: the next ${REDO_STAY_PROMPTS} prompts stay on ${inUse}`)
+          message: shown,
+          typed: e.text,
+          earlier,
+          context: await recentContext($).catch(() => ''),
+          current: { model: inUse, effort: before?.effort ?? 'medium' },
+          sessionEffort: sessionEffort(),
+          ...(phaseNow ? { phase: phaseNow } : {}),
+          settings: await judgeSettings($),
+          rules: wantsEffort && !slash,
+          bare,
+          manual: before?.by === 'manual',
+          harness: 'claude-code',
+          session: loadedSession,
+        },
+        judgePorts($, await judgeKey($), glow),
+      )
+      if (d.by === 'phase') {
+        const at = await pickPhase($, d.why, d.effort)
+        await countPrompt($, inUse !== 'haiku' ? at : undefined, 'phase', 0, 0)
+        void proof($, `the ${phaseNow?.name} phase: ${at} for "${e.text.slice(0, 50)}", no judge`)
+        $.ui.invalidate('ui.render')
+      } else if (d.by === 'rule') {
+        await pickByRule($, isThanks(e.text), e.text.trim(), d.effort)
+        $.ui.invalidate('ui.render')
+      } else if (d.by === 'named') {
+        const named = d.effort as Effort
+        await choose($, { model: inUse, effort: named, why: d.why, by: 'named' })
+        if (routed) routed = null
+        await countPrompt($, inUse !== 'haiku' ? named : undefined, 'named', 0, 0)
+        void proof($, `named level ${named} in "${e.text.slice(0, 50)}": no judge`)
+        $.ui.invalidate('ui.render')
+      } else {
+        const verdict = d.verdict
+        await afterJev($, d.warn, d.by === 'jev')
+        await endJudgeGlow($, 'verdict')
+        const ms = d.event.judge?.ms ?? 0
+        await countPrompt($, wantsEffort && inUse !== 'haiku' ? verdict?.effort : undefined, verdict?.by, ms, d.event.judge?.tokens ?? 0)
+        void proof(
+          $,
+          verdict
+            ? `judged by ${verdict.by} in ${ms} ms: ${verdict.model}/${verdict.effort} (${verdict.why}) for "${e.text.slice(0, 50)}"`
+            : `no verdict after ${ms} ms for "${e.text.slice(0, 50)}"`,
+        )
+        $.ui.invalidate('ui.render')
+        if (verdict) {
+          // Effort follows the verdict at once, when Auto is on for effort. The model stays: switching it
+          // reloads the context, so with Auto on for model it is only suggested.
+          if (wantsEffort && d.effort) await choose($, { ...verdict, model: inUse, effort: d.effort, why: d.why })
+          // A prompt the judge calls simple runs on a cheaper model.
+          {
+            let to = wantsEffort && config.modelAuto === 'on' ? routeTo(verdict.model, inUse) : null
+            // The last prompt ran on a cheaper model and this one says it was wrong: that is a miss. The retry runs on the
+            // chat's own model, and so do the next few prompts.
+            if (routed && looksLikeRedo(e.text)) {
+              stayUp = REDO_STAY_PROMPTS
+              await update($, saved, old => ({ ...asSpent(old), redone: asSpent(old).redone + 1 }))
+              void proof($, `redo after ${routed}: the next ${REDO_STAY_PROMPTS} prompts stay on ${inUse}`)
+            }
+            if (stayUp > 0) {
+              stayUp--
+              if (to) void proof($, `stays on ${inUse}: a cheaper answer was just redone (${stayUp} more)`)
+              to = null
+            }
+            // A switch to a model whose cache is cold writes the whole chat to it: stay when that costs more than it saves.
+            const now = await $.clock.now().catch(() => Date.now())
+            if (to && !routeWorth(to, inUse, lastContext?.tokens ?? 0, { to: isWarm(to, now), inUse: !(cacheExpires > 0 && now >= cacheExpires) })) {
+              void proof($, `stays on ${inUse}: ${to} has a cold cache, switching would cost more`)
+              to = null
+            }
+            if (to) await update($, saved, old => ({ ...asSpent(old), moved: asSpent(old).moved + 1 }))
+            if (to !== routed) {
+              routed = to
+              void proof($, to ? `this prompt runs on ${to} (the chat is on ${inUse})` : `back on ${inUse}`)
+              $.ui.invalidate('ui.render')
+            }
           }
-          if (stayUp > 0) {
-            stayUp--
-            if (to) void proof($, `stays on ${inUse}: a cheaper answer was just redone (${stayUp} more)`)
-            to = null
+          if (wantsModel && verdict.model !== inUse && verdict.model !== declined) {
+            await update($, suggestion, () => verdict.model)
+            $.ui.toast(`Suggestion: switch to ${verdict.model}? /effortless switch or /effortless keep`)
+          } else if (verdict.model === inUse) {
+            await update($, suggestion, () => null)
           }
-          // A switch to a model whose cache is cold writes the whole chat to it: stay when that costs more than it saves.
-          const now = await $.clock.now().catch(() => Date.now())
-          if (to && !routeWorth(to, inUse, lastContext?.tokens ?? 0, { to: isWarm(to, now), inUse: !(cacheExpires > 0 && now >= cacheExpires) })) {
-            void proof($, `stays on ${inUse}: ${to} has a cold cache, switching would cost more`)
-            to = null
-          }
-          if (to) await update($, saved, old => ({ ...asSpent(old), moved: asSpent(old).moved + 1 }))
-          if (to !== routed) {
-            routed = to
-            void proof($, to ? `this prompt runs on ${to} (the chat is on ${inUse})` : `back on ${inUse}`)
-            $.ui.invalidate('ui.render')
-          }
-        }
-        if (wantsModel && verdict.model !== inUse && verdict.model !== declined) {
-          await update($, suggestion, () => verdict.model)
-          $.ui.toast(`Suggestion: switch to ${verdict.model}? /effortless switch or /effortless keep`)
-        } else if (verdict.model === inUse) {
-          await update($, suggestion, () => null)
         }
       }
     } finally {
       // A judge that failed or threw ends the glow here.
-      await endJudgeGlow($, 'end')
-      await update($, isJudging, () => false)
+      if (judging) {
+        await endJudgeGlow($, 'end')
+        await update($, isJudging, () => false)
+      }
     }
     return next(e)
   })

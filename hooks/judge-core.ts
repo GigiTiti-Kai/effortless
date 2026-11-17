@@ -324,3 +324,279 @@ export function helperFloor(floor: Effort, ceiling: Effort): Effort {
   const i = Math.min(Math.max(EFFORTS.indexOf(floor), EFFORTS.indexOf('medium')), EFFORTS.indexOf(ceiling))
   return EFFORTS[i]
 }
+
+// One decision. The core says which level is right; when to send it, and whether a harness can apply it at all
+// (Claude Code leaves Haiku and cache-unsafe models alone), stays with the harness.
+
+export type Harness = 'claude-code' | 'codex' | 'grok' | 'agy' | 'hermes'
+
+/** The person's settings a decision reads. saving: save mode caps at medium. withModel: the judge is asked for a model too. */
+export type JudgeSettings = { judge: 'auto' | 'haiku' | 'jev'; bias: number; floor: Effort; ceiling: Effort; saving: boolean; withModel: boolean }
+
+/** What a harness lends the judge to reach the world. Without askJev, Jev is not asked. */
+export type Ports = {
+  askJev?: (body: unknown) => Promise<{ ok: boolean; status: number; text: string }>
+  /** Haiku's reply text and the tokens it took, or nothing when it did not answer. */
+  askHaiku: (system: string, prompt: string) => Promise<{ text: string; tokens: number } | undefined>
+  sleep: (ms: number) => Promise<unknown>
+  now: () => number
+  /** Called once, just before a judge is asked: Claude Code starts its glow here. */
+  judging?: () => Promise<void>
+}
+
+/** What Jev said, as numbers only: the record keeps no text. */
+export type JevSeen = { choice: Effort; sure?: number; continues_work?: number; needs_lookup?: number; least?: Effort; p?: Partial<Record<Effort, number>> }
+
+/** One ask of the judges: the verdict, or why there is none. */
+export type Judged = {
+  verdict?: Pick
+  tokens: number
+  ms?: number
+  /** Why Jev failed, in words for the person, when they should be told: an error status, a timeout, no connection. */
+  warn?: string
+  /** Jev was asked and gave no verdict (an unreadable answer too, which warns nobody). */
+  fellBack?: boolean
+  jev?: JevSeen
+}
+
+/** Jev on TypeSafe: a verdict, or why not. Never throws: a stalled endpoint is given up after JEV_TIMEOUT_MS. */
+export async function askJevOnce(message: string, current: Pick | null, context: string, withModel: boolean, ports: Ports): Promise<Judged> {
+  if (!ports.askJev) return { tokens: 0 }
+  try {
+    const res = await Promise.race([
+      ports.askJev(jevRequest(message, current, context, withModel)),
+      ports.sleep(JEV_TIMEOUT_MS).then(() => {
+        throw new Error('jev timeout')
+      }),
+    ])
+    const warn = res.ok ? undefined : judgeFailure('Jev', res.status)
+    const verdict = res.ok ? parseJevAnswer(res.text, current) : undefined
+    if (!verdict) return { tokens: 0, warn, fellBack: true }
+    let used = 0
+    try {
+      const usage = (JSON.parse(res.text) as { usage?: { input_tokens?: number; output_tokens?: number } }).usage
+      used = (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0)
+    } catch {
+      // No usage in the reply: counted as 0.
+    }
+    return { verdict: { ...verdict, by: 'jev' }, tokens: used, jev: jevSeen(res.text, verdict.least) }
+  } catch (error) {
+    return { tokens: 0, warn: String(error).includes('timeout') ? judgeFailure('Jev', 'timeout') : 'Jev could not be reached', fellBack: true }
+  }
+}
+
+/** Jev's answer as the record keeps it. */
+function jevSeen(text: string, least: Effort | undefined): JevSeen {
+  type Answer = { choice?: string; confidence?: number; probabilities?: Record<string, number>; noul?: number }
+  const json = JSON.parse(text) as { answers?: Record<string, Answer>; result?: { answers?: Record<string, Answer> } }
+  const a = json.answers ?? json.result?.answers
+  const choice = a?.effort?.choice as Effort
+  const p = a?.effort?.probabilities
+  const seen: JevSeen = { choice }
+  const sure = a?.effort?.confidence ?? p?.[choice]
+  if (typeof sure === 'number') seen.sure = sure
+  if (typeof a?.continues_work?.noul === 'number') seen.continues_work = a.continues_work.noul
+  if (typeof a?.needs_lookup?.noul === 'number') seen.needs_lookup = a.needs_lookup.noul
+  if (least) seen.least = least
+  if (p) seen.p = Object.fromEntries(EFFORTS.filter(e => typeof p[e] === 'number').map(e => [e, p[e]]))
+  return seen
+}
+
+/** Haiku with the old judge prompt: a verdict, or nothing. */
+export async function askHaikuOnce(message: string, current: Pick | null, context: string, ports: Ports): Promise<Judged> {
+  const r = await ports.askHaiku(JUDGE_SYSTEM, judgeQuestion(message, current, context))
+  const verdict = r ? parseVerdict(r.text) : undefined
+  return { verdict: verdict && { ...verdict, by: 'haiku' }, tokens: r?.tokens ?? 0 }
+}
+
+/**
+ * Jev first, when it can be asked and the setting is not haiku; Haiku makes the call only when Jev is down, slow or
+ * unreadable: sending Jev's unsure calls to Haiku scored the same or lower (EFR-5).
+ */
+export async function askJudges(message: string, current: Pick | null, context: string, settings: JudgeSettings, ports: Ports): Promise<Judged> {
+  const start = ports.now()
+  const jev = settings.judge !== 'haiku' ? await askJevOnce(message, current, context, settings.withModel, ports) : { tokens: 0 }
+  if (jev.verdict) return { ...jev, ms: ports.now() - start }
+  const haiku = await askHaikuOnce(message, current, context, ports)
+  return { ...haiku, warn: jev.warn, fellBack: jev.fellBack, ms: ports.now() - start }
+}
+
+/** A verdict's level after the person's lean, Min, Max and save mode, and the reason shown for it. */
+export function settle(verdict: Pick, bias: number, floor: Effort, ceiling: Effort, saving: boolean) {
+  const leaned = leanedVerdict(verdict, bias)
+  const inRange = bounded(leaned, floor, ceiling)
+  const effort = capped(inRange, saving)
+  const why = effort !== inRange ? 'save mode' : inRange !== verdict.effort ? 'your settings' : verdict.why
+  return { leaned, inRange, effort, why }
+}
+
+/** Thanks is low within Min and Max; a go-ahead keeps the session's own effort (nothing, when it is not known yet). */
+export function ruleEffort(thanks: boolean, sessionEffort: Effort | undefined, floor: Effort, ceiling: Effort): Effort | undefined {
+  return thanks ? bounded('low', floor, ceiling) : sessionEffort
+}
+
+export type DecisionInput = {
+  /** What the judge reads: the message with what it carries (attachments, a skill's description, carried messages). */
+  message: string
+  /** The person's own words: a named level, thanks and a go-ahead are read here. */
+  typed: string
+  /** Messages typed during the last turn that carry work: a level named last there counts as named. */
+  earlier?: readonly string[]
+  /** contextFrom's text: the last user message and the end of the assistant's last reply. */
+  context: string
+  /** The level in use. Claude Code: the saved pick (medium without one) on the session's model. */
+  current: { model: ModelKey; effort: Effort } | null
+  /** What a go-ahead keeps. */
+  sessionEffort?: Effort
+  /** The phase running now; the harness finds it. */
+  phase?: { name: string; effort: Effort }
+  settings: JudgeSettings
+  /** The rules before the judge may decide: Auto runs effort and the message is not a slash command. */
+  rules: boolean
+  /** And the message carries no image, file or carried message: thanks and a go-ahead are read as such only then. */
+  bare: boolean
+  /** The level in use was set by hand: a go-ahead is judged rather than kept. */
+  manual?: boolean
+  harness: Harness
+  session: string
+  turn?: string
+}
+
+export type Decision = {
+  /** The level to run; undefined is "change nothing" (a go-ahead before the session effort is known, no verdict). */
+  effort: Effort | undefined
+  /** The judge's model, only when it was asked for one. */
+  model?: ModelKey
+  by: 'named' | 'rule' | 'phase' | 'jev' | 'haiku' | 'none'
+  why: string
+  /** The judge's own answer, before the person's lean, Min, Max and save mode. */
+  verdict?: Pick
+  /** Jev failed in a way to tell the person; Haiku stood in. */
+  warn?: string
+  event: DecisionEvent
+}
+
+/** One decision as a record: levels, odds, time and tokens; never the message, the context or a key. */
+export type DecisionEvent = {
+  v: 1
+  harness: Harness
+  session: string
+  turn?: string
+  /** UNIX seconds. */
+  at: number
+  decided: Effort | null
+  by: Decision['by']
+  auto: boolean
+  judge?: {
+    jev?: JevSeen
+    haiku?: { effort: Effort; sure?: number }
+    leaned?: Effort
+    bounded?: Effort
+    capped?: Effort
+    ms: number
+    tokens: number
+    fallback?: string
+  }
+}
+
+/** What a harness saw run, written when it sees the level that took effect. */
+export type AppliedEvent = {
+  v: 1
+  harness: Harness
+  session: string
+  turn?: string
+  at: number
+  applied: Effort | null
+  by: 'jev' | 'haiku' | 'rule' | 'phase' | 'named' | 'skill' | 'manual' | 'app'
+  /** The level that ran differs from the one decided, and the person did not change it. */
+  reverted?: boolean
+}
+
+/**
+ * The level for the next message: a phase's level, thanks, a go-ahead, a named level, else Jev, else Haiku, then the
+ * person's lean, Min, Max and save mode. The same order prompt.submit always had. A named level beats the phase.
+ */
+export async function decide(input: DecisionInput, ports: Ports): Promise<Decision> {
+  const s = input.settings
+  const named = input.rules ? namedEffort(input.typed) ?? lastNamed(input.earlier ?? []) : undefined
+  const made = (effort: Effort | undefined, by: Decision['by'], why: string, rest: Partial<Decision> = {}, judge?: DecisionEvent['judge']): Decision => ({
+    effort,
+    by,
+    why,
+    ...rest,
+    event: {
+      v: 1,
+      harness: input.harness,
+      session: input.session,
+      ...(input.turn !== undefined ? { turn: input.turn } : {}),
+      at: Math.floor(ports.now() / 1000),
+      decided: effort ?? null,
+      by,
+      auto: by !== 'named' && by !== 'none',
+      ...(judge ? { judge } : {}),
+    },
+  })
+  if (input.rules && input.phase && !named) return made(capped(bounded(input.phase.effort, s.floor, s.ceiling), s.saving), 'phase', `${input.phase.name} phase`)
+  if (input.bare && isThanks(input.typed)) return made(ruleEffort(true, input.sessionEffort, s.floor, s.ceiling), 'rule', 'thanks')
+  if (input.bare && !input.manual && isFollowUp(input.typed) && keepsEffort(input.typed, input.context)) {
+    return made(ruleEffort(false, input.sessionEffort, s.floor, s.ceiling), 'rule', 'a go-ahead: the session effort')
+  }
+  if (named) return made(named, 'named', 'you asked for it')
+
+  await ports.judging?.()
+  const current: Pick | null = input.current && { ...input.current, why: '', by: 'manual' }
+  const j = await askJudges(input.message, current, input.context, s, ports)
+  const fallback = j.warn ?? (j.fellBack ? 'Jev gave no usable answer' : undefined)
+  const record = { ms: j.ms ?? 0, tokens: j.tokens, ...(j.jev ? { jev: j.jev } : {}), ...(fallback ? { fallback } : {}) }
+  const rest = { ...(j.warn ? { warn: j.warn } : {}) }
+  const verdict = j.verdict
+  if (!verdict) return made(undefined, 'none', '', rest, record)
+  const { leaned, inRange, effort, why } = settle(verdict, s.bias, s.floor, s.ceiling, s.saving)
+  const haiku = verdict.by === 'haiku' ? { haiku: { effort: verdict.effort, ...(verdict.sure !== undefined ? { sure: verdict.sure } : {}) } } : {}
+  const by = verdict.by === 'jev' ? 'jev' : 'haiku'
+  return made(effort, by, why, { ...rest, verdict, ...(s.withModel ? { model: verdict.model } : {}) }, { ...record, ...haiku, leaned, bounded: inRange, capped: effort })
+}
+
+export type Scorecard = {
+  decisions: number
+  /** Decisions by harness, by who made them and by level ('none': nothing changed). */
+  counts: { harness: Harness; by: Decision['by']; effort: Effort | 'none'; n: number }[]
+  /** Share of decisions a rule, a phase or a judge made (0-1). */
+  auto: number
+  /** Share of the decisions Jev was asked for that it gave none and Haiku (or nothing) stood in (0-1). */
+  fellBack: number
+  /** Applied levels that differed from the decided one without the person changing it. */
+  reverted: number
+  /** For each level, Jev's probability for it in tenths: [0] counts 0-0.1, [9] counts 0.9-1. */
+  jev: Record<Effort, number[]>
+}
+
+/** The table HCM-210 reads, from the records alone. */
+export function scorecard(events: readonly (DecisionEvent | AppliedEvent)[]): Scorecard {
+  const decisions = events.filter((e): e is DecisionEvent => 'decided' in e)
+  const counts = new Map<string, Scorecard['counts'][number]>()
+  const jev = Object.fromEntries(EFFORTS.map(e => [e, Array<number>(10).fill(0)])) as Record<Effort, number[]>
+  let auto = 0
+  let asked = 0
+  let fell = 0
+  for (const d of decisions) {
+    const effort = d.decided ?? 'none'
+    const key = `${d.harness}|${d.by}|${effort}`
+    const row = counts.get(key) ?? { harness: d.harness, by: d.by, effort, n: 0 }
+    row.n++
+    counts.set(key, row)
+    if (d.auto) auto++
+    if (d.judge?.jev || d.judge?.fallback) asked++
+    if (d.judge?.fallback) fell++
+    for (const [level, p] of Object.entries(d.judge?.jev?.p ?? {}) as [Effort, number][]) jev[level][Math.min(9, Math.floor(p * 10))]++
+  }
+  const share = (n: number, of: number) => (of ? n / of : 0)
+  return {
+    decisions: decisions.length,
+    counts: [...counts.values()],
+    auto: share(auto, decisions.length),
+    fellBack: share(fell, asked),
+    reverted: events.filter(e => 'applied' in e && e.reverted).length,
+    jev,
+  }
+}
