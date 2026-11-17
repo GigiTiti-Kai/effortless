@@ -2,7 +2,7 @@
   {
     "id": "b1",
     "difficulty": "easy",
-    "file": "hooks/register.tsx",
+    "file": "hooks/judge-core.ts",
     "find": "saving && EFFORTS.indexOf(effort) > EFFORTS.indexOf('medium') ? 'medium' : effort",
     "replace": "saving && EFFORTS.indexOf(effort) < EFFORTS.indexOf('medium') ? 'medium' : effort",
     "report": "Save mode does the opposite of what it says. With it on, prompts still run at high and xhigh effort, and quick questions that used to run at low now get bumped up to medium. With save mode off everything looks normal.",
@@ -44,7 +44,7 @@
   {
     "id": "b4",
     "difficulty": "medium",
-    "file": "hooks/register.tsx",
+    "file": "hooks/judge-core.ts",
     "find": "(Math.abs(bias) === 1 ? 0.65 : 0.85)",
     "replace": "(Math.abs(bias) === 1 ? 0.85 : 0.65)",
     "report": "The effort slider's notches feel swapped. One notch toward smarter already moves picks the judge was fairly sure about, and the outer notch moves fewer picks than the first one does. I'd expect the outer notch to tip more close calls, not fewer.",
@@ -89,7 +89,7 @@
   {
     "id": "b8",
     "difficulty": "hard",
-    "file": "hooks/register.tsx",
+    "file": "hooks/judge-core.ts",
     "find": "const i = Math.min(Math.max(EFFORTS.indexOf(floor), EFFORTS.indexOf('medium')), EFFORTS.indexOf(ceiling))",
     "replace": "const i = Math.max(Math.min(EFFORTS.indexOf(floor), EFFORTS.indexOf(ceiling)), EFFORTS.indexOf('medium'))",
     "report": "I set Max effort to low. The main chat respects it, but with Helpers on, subagents still run at medium. Nothing should go above my Max.",
@@ -112,7 +112,7 @@
   {
     "id": "b10",
     "difficulty": "hard",
-    "file": "hooks/register.tsx",
+    "file": "hooks/judge-core.ts",
     "find": "const reply = context.split('\\nassistant: ').pop() ?? ''",
     "replace": "const reply = context.split('\\nassistant: ')[0] ?? ''",
     "report": "When Claude's reply ends with a question like \"Should I archive it?\" and I answer \"yes\", effortless just keeps the previous effort instead of judging the work my answer starts. And the other way round: if my own previous message had a question mark in it, a plain \"go\" between two steps gets judged even though Claude didn't ask anything.",
