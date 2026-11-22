@@ -135,12 +135,12 @@ export async function nextLine(after = 0): Promise<string | undefined> {
 }
 
 /**
- * Shows a question and returns the first line typed after it. A line that came before it (also in the same
- * millisecond, or still unread on stdin when the question went out) stays queued as a message: a message typed ahead
- * never answers an approval. Lines are told apart by their order, not by the clock.
+ * Shows a question and returns the first line received after it. A line received before it (also in the same
+ * millisecond) stays queued as a message, so a message typed ahead never answers an approval; a line after it, however
+ * fast, is the answer and never becomes a message. Lines are told apart by the order they came in, not by the clock.
  */
 export async function ask(question: string): Promise<string | undefined> {
+  const after = received
   process.stdout.write(question)
-  await new Promise(r => setTimeout(r, 20)) // read what stdin already held: it was typed before the question
-  return nextLine(received)
+  return nextLine(after)
 }

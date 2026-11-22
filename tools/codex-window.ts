@@ -76,17 +76,21 @@ listeners.push(m => {
   console.log(`\n[effortless] ${s.model} at ${effort} set elsewhere: Auto off`)
 })
 
+type Change = { path: string; kind?: unknown; diff?: string }
+
 /**
- * What an approval grants, as the terminal shows it: everything Codex sent but its ids and clock (the command, extra
- * permissions, network, the permissions asked), so nothing it grants is left off; and the files a change touches.
+ * An approval's question, as the terminal shows it: everything Codex sent but its ids and clock (the command, extra
+ * permissions, network, the permissions asked), so nothing it grants is left off; and for a file change, each file
+ * with its diff, as Codex reported them when the change started.
  */
-function asked(a: { method: string; params: Record<string, unknown> }, files: Map<string, string[]>): string {
+function question(a: { method: string; params: Record<string, unknown> }, changes: Map<string, Change[]>): string {
   const hidden = new Set(['threadId', 'turnId', 'itemId', 'approvalId', 'startedAtMs'])
   const shown: Record<string, unknown> = Object.fromEntries(Object.entries(a.params).filter(([k, v]) => !hidden.has(k) && v != null))
-  const paths = files.get(String(a.params.itemId))
-  if (paths) shown.files = paths
   const span = a.method === 'item/permissions/requestApproval' ? 'for this turn' : 'once'
-  return `${a.method.split('/')[1]} ${span}: ${JSON.stringify(shown)}`
+  const files = changes.get(String(a.params.itemId))
+  const diffs = files?.map(c => `--- ${c.path} ${JSON.stringify(c.kind ?? '')}\n${c.diff ?? '(no diff reported)'}`).join('\n')
+  const body = a.method === 'item/fileChange/requestApproval' ? `\n${diffs ?? '(Codex has not reported which files or what changes)'}` : ''
+  return `\n[approve ${a.method.split('/')[1]} ${span}: ${JSON.stringify(shown)}]${body}\ny/N `
 }
 
 /**
@@ -99,15 +103,15 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
   let resolveDone!: () => void
   const done = new Promise<void>(r => (resolveDone = r))
   const approvals: { id: number; method: string; params: Record<string, unknown> }[] = []
-  const files = new Map<string, string[]>()
+  const changes = new Map<string, Change[]>()
   const on = (m: { method: string; params: Record<string, unknown>; id?: number }) => {
     if (m.params?.threadId !== undefined && m.params.threadId !== t.id) return
     if (m.method === 'item/agentMessage/delta') {
       streamed = true
       process.stdout.write(String(m.params.delta))
     }
-    const item = m.params?.item as { type?: string; id?: string; text?: string; changes?: { path: string }[] } | undefined
-    if (m.method === 'item/started' && item?.type === 'fileChange' && item.id) files.set(item.id, (item.changes ?? []).map(c => c.path))
+    const item = m.params?.item as { type?: string; id?: string; text?: string; changes?: Change[] } | undefined
+    if (m.method.startsWith('item/') && item?.type === 'fileChange' && item.id && item.changes) changes.set(item.id, item.changes)
     if (m.method === 'item/completed' && item?.type === 'agentMessage') answer = String(item.text ?? '')
     if (m.id !== undefined && /requestApproval$/.test(m.method)) approvals.push(m as never)
     else if (m.id !== undefined) {
@@ -135,7 +139,7 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
     const next = await Promise.race([done.then(() => 'done' as const), new Promise<'tick'>(r => setTimeout(() => r('tick'), 100))])
     for (const a of approvals.splice(0)) {
       // Only y or yes typed after the question grants: a message that merely starts with y ("yes, that report...") declines.
-      const yes = /^\s*(y|yes)\s*$/i.test((await ask(`\n[approve ${asked(a, files)}] y/N `)) ?? '')
+      const yes = /^\s*(y|yes)\s*$/i.test((await ask(question(a, changes))) ?? '')
       reply(a.id, a.method === 'item/permissions/requestApproval' ? { permissions: yes ? a.params.permissions : {}, scope: 'turn' } : { decision: yes ? 'accept' : 'decline' })
     }
     if (next === 'done') break

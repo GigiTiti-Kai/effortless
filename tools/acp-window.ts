@@ -101,6 +101,8 @@ async function runTurn(text: string): Promise<boolean> {
   let asking = Promise.resolve() // one approval on screen at a time: the next waits for the answer to this one
   // Each tool call as the agent reported it so far (tool_call, then tool_call_update): an approval may name only its id.
   const calls = new Map<string, Record<string, unknown>>()
+  // A partial report on top of the earlier ones: a null field, like a missing one, leaves it as it was (ACP v1).
+  const over = (base: Record<string, unknown> | undefined, update: Record<string, unknown> | undefined) => ({ ...base, ...Object.fromEntries(Object.entries(update ?? {}).filter(([, v]) => v != null)) })
   const on = (m: Note) => {
     if (m.method === 'session/update' && m.params.sessionId === t.id) {
       const u = m.params.update as { sessionUpdate?: string; content?: { text?: string }; toolCallId?: string }
@@ -108,7 +110,7 @@ async function runTurn(text: string): Promise<boolean> {
         answer += u.content.text
         process.stdout.write(u.content.text)
       }
-      if ((u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') && u.toolCallId) calls.set(u.toolCallId, { ...calls.get(u.toolCallId), ...u })
+      if ((u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') && u.toolCallId) calls.set(u.toolCallId, over(calls.get(u.toolCallId), u))
     }
     if (m.method === 'session/request_permission' && m.id !== undefined) asking = asking.then(() => approve(m))
   }
@@ -118,12 +120,16 @@ async function runTurn(text: string): Promise<boolean> {
       const options = p.options ?? []
       // What the call does, as everything the agent told about it but its bookkeeping: its kind, the files it touches
       // (locations), its input (rawInput: the path and the text to write) and its content (diffs).
-      const call = { ...calls.get(String(p.toolCall?.toolCallId)), ...p.toolCall }
-      const hidden = new Set(['sessionUpdate', 'toolCallId', 'title', 'status', 'rawOutput'])
+      const call = over(calls.get(String(p.toolCall?.toolCallId)), p.toolCall)
+      const hidden = new Set(['sessionUpdate', 'toolCallId', 'title', 'status', 'rawOutput', 'content'])
       const shown = Object.fromEntries(Object.entries(call).filter(([k, v]) => !hidden.has(k) && v != null))
+      // Each diff as text (the old text and the new), other content as it came.
+      type Content = { type?: string; path?: string; oldText?: string | null; newText?: string }
+      const content = Array.isArray(call.content) ? (call.content as Content[]) : []
+      const diffs = content.map(c => (c.type === 'diff' ? `--- ${c.path}\n${c.oldText == null ? '(new file)' : `old:\n${c.oldText}`}\nnew:\n${c.newText}` : JSON.stringify(c, null, 2)))
       // Every option with how long it holds (allow_always is never behind a plain yes); anything else rejects once.
       const list = options.map((o, i) => `  ${i + 1}) ${o.name ?? o.optionId} [${o.kind ?? 'kind not given'}]`).join('\n')
-      const question = `\n[approve? ${call.title ?? 'a tool'}]\n${JSON.stringify(shown, null, 2)}\n${list}\nnumber (anything else: reject this once) `
+      const question = `\n[approve? ${call.title ?? 'a tool'}]\n${JSON.stringify(shown, null, 2)}\n${diffs.map(d => `${d}\n`).join('')}${list}\nnumber (anything else: reject this once) `
       // Only a line typed after the question answers it: a message typed ahead stays queued as a message.
       const n = Number(((await ask(question)) ?? '').trim())
       const pick = (Number.isInteger(n) && n > 0 ? options[n - 1] : undefined) ?? options.find(o => o.kind === 'reject_once')
