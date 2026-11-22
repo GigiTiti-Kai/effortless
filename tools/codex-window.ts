@@ -93,16 +93,18 @@ function question(a: { method: string; params: Record<string, unknown> }, change
   return `\n[approve ${a.method.split('/')[1]} ${span}: ${JSON.stringify(shown)}]${body}\ny/N `
 }
 
+// Items Codex makes without the model: the input, a hook's prompt, compaction and review markers.
+const NOT_MODEL = new Set(['userMessage', 'hookPrompt', 'contextCompaction', 'enteredReviewMode', 'exitedReviewMode'])
+
 /**
  * Runs one turn to its end, printing the reply; approvals are asked on the terminal. Returns the turn's id, or nothing
- * when Codex refused to start it. ran: the model answered at least once (a turn that failed before any reply, such as
- * a Responses API 400, ran at no level).
+ * when Codex refused to start it. ran: the model answered at least once. A turn it never answered ran at no level: one
+ * a local hook stopped before the model was asked (completed, no request), or one the Responses API refused (a 400).
  */
 async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: string; ran: boolean } | undefined> {
   let answer = ''
   let streamed = false
   let answered = false
-  let failed = false
   let resolveDone!: () => void
   const done = new Promise<void>(r => (resolveDone = r))
   const approvals: { id: number; method: string; params: Record<string, unknown> }[] = []
@@ -116,7 +118,12 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: 
     const item = m.params?.item as { type?: string; id?: string; text?: string; changes?: Change[] } | undefined
     if (m.method.startsWith('item/') && item?.type === 'fileChange' && item.id && item.changes) changes.set(item.id, item.changes)
     if (m.method === 'item/completed' && item?.type === 'agentMessage') answer = String(item.text ?? '')
-    if (m.method === 'item/completed' && item?.type && item.type !== 'userMessage') answered = true
+    if (m.method === 'item/completed' && item?.type && !NOT_MODEL.has(item.type)) answered = true
+    if (m.method === 'hook/completed') {
+      // A hook that stopped the message: say so and why, or the window shows only an empty line.
+      const run = m.params.run as { eventName?: string; status?: string; entries?: { text?: string }[] } | undefined
+      if (run?.status === 'blocked' || run?.status === 'failed') process.stdout.write(`\n[effortless] the ${run.eventName} hook ${run.status} it${run.entries?.length ? `: ${run.entries.map(e => e.text).join(' ')}` : ''}\n`)
+    }
     if (m.id !== undefined && /requestApproval$/.test(m.method)) approvals.push(m as never)
     else if (m.id !== undefined) {
       // Codex asks something this client cannot show (user input, an MCP form, a client tool): say no, so the turn goes on.
@@ -126,7 +133,6 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: 
     if (m.method === 'turn/completed') {
       // A turn the model refused or that broke off ends too: say so, or the window shows only an empty line.
       const turn = m.params.turn as { status?: string; error?: { message?: string } | null } | undefined
-      failed = turn?.status === 'failed'
       if (turn?.status && turn.status !== 'completed') process.stdout.write(`\n[effortless] the turn ${turn.status}${turn.error?.message ? `: ${turn.error.message}` : ''}\n`)
       resolveDone()
     }
@@ -152,7 +158,7 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: 
   listeners.splice(listeners.indexOf(on), 1)
   process.stdout.write(streamed ? '\n' : `${answer}\n`)
   t = remember(t, 'assistant', answer)
-  return { id: started.turn.id, ran: answered || !failed }
+  return { id: started.turn.id, ran: answered }
 }
 
 while (true) {
