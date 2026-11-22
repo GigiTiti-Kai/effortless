@@ -1,4 +1,4 @@
-// The ACP agents' adapter (HCM-207): Grok's and agy's effort options as window threads. Run by tools/test.sh with `node --test`.
+// The ACP agents' adapter (HCM-207): Grok's, agy's and Hermes' effort options as window threads. Run by tools/test.sh with `node --test`.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
@@ -20,6 +20,18 @@ test("each agent's effort option is read by its own id", () => {
   const t = sessionFrom('agy', 's', agy)
   assert.deepEqual([t.harness, t.model, t.effort, t.base, t.by, judgeable(t)], ['agy', 'gemini-4-neon', 'high', 'high', 'app', true])
   assert.equal(judgeable(sessionFrom('agy', 's', grok)), false)
+})
+
+// Hermes 0.23.3 through `hermes acp` (HCM-207 M4): more levels than the core, and the model id carries its provider.
+const hermesChoices = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(value => ({ value }))
+const hermes = level => [{ id: 'edit_approval_policy', currentValue: 'ask', options: [] }, { id: 'model', currentValue: 'openai-codex:gpt-6.1-sol', options: [] }, { id: 'reasoning_effort', currentValue: level, options: hermesChoices }]
+
+test('Hermes: a judged max is sent; a level outside the core (ultra, none, default) is not judged and stays', async () => {
+  const t = sessionFrom('hermes', 's', hermes('high'))
+  assert.deepEqual([t.model, t.effort, judgeable(t)], ['openai-codex:gpt-6.1-sol', 'high', true])
+  const d = await decide(inputFor(t, 'prove this conjecture', settings, true), jev('max'))
+  assert.deepEqual(turnPlan(t, d), { carry: { effort: 'max' }, by: 'jev' })
+  for (const level of ['ultra', 'none', 'default']) assert.equal(judgeable(sessionFrom('hermes', 's', hermes(level))), false)
 })
 
 test('a judged max on an agent with no max sends nothing: the level in use stays (HCM-217 decision 4)', async () => {

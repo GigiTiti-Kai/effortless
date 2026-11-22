@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// The ACP window client (HCM-207) for Grok and agy: type messages here instead of in their own screen, and each one is
-// judged before the agent sees it. The judged level is set with session/set_config_option only when it differs from
-// the session's, and read back. Only the sessions opened here are judged. Run: node tools/acp-window.ts --agent grok|agy
+// The ACP window client (HCM-207) for Grok, agy and Hermes: type messages here instead of in their own screen, and
+// each one is judged before the agent sees it. The judged level is set with session/set_config_option only when it
+// differs from the session's, and read back. Only the sessions opened here are judged. `hermes acp` starts the Hermes
+// gateway if none runs; it ends by itself once idle (--idle-exit). Run: node tools/acp-window.ts --agent grok|agy|hermes
 //   /effort <level>  your pick: Auto goes off until /auto on
 //   /auto on|off     off puts the session's starting level back before the next message
 //   /quit
@@ -15,11 +16,11 @@ import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, tu
 import { decide } from '../hooks/judge-core.ts'
 import { ask, judgePorts, logPath, nextLine, OPTIONS, record as recordTo, settingsFrom } from './window-judge.ts'
 
-const AGENTS = { grok: ['grok', 'agent', '--no-leader', 'stdio'], agy: ['agy', 'acp'] } as const
+const AGENTS = { grok: ['grok', 'agent', '--no-leader', 'stdio'], agy: ['agy', 'acp'], hermes: ['hermes', 'acp'] } as const
 const { values: opt } = parseArgs({ options: { ...OPTIONS, agent: { type: 'string' } } })
-const harness = opt.agent === 'grok' || opt.agent === 'agy' ? opt.agent : undefined
+const harness = opt.agent === 'grok' || opt.agent === 'agy' || opt.agent === 'hermes' ? opt.agent : undefined
 if (!harness) {
-  console.error('usage: acp-window.ts --agent grok|agy')
+  console.error('usage: acp-window.ts --agent grok|agy|hermes')
   process.exit(2)
 }
 const settings = settingsFrom(opt)
