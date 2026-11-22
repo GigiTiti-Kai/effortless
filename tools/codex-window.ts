@@ -51,7 +51,8 @@ const call = <T>(method: string, params: object): Promise<T> =>
   })
 const reply = (n: number, result: object) => server.stdin.write(JSON.stringify({ id: n, result }) + '\n')
 
-await call('initialize', { clientInfo: { name: 'effortless-codex-window', version: '1' } })
+// experimentalApi: without it Codex never sends thread/settings/updated, so a level another client picks goes unseen.
+await call('initialize', { clientInfo: { name: 'effortless-codex-window', version: '1' }, capabilities: { experimentalApi: true, requestAttestation: false } })
 server.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n')
 const list = await call<ModelList>('model/list', {})
 type Opened = Parameters<typeof threadFrom>[0] & { thread: { path: string | null } }
@@ -63,6 +64,7 @@ const rollout = opened.thread.path
 let auto = !opt['no-auto']
 let restoring = false
 let picked: string | undefined
+let elsewhere = 0 // how many changes another client made: a turn that saw one does not put its own level back
 console.log(`[effortless] thread ${t.id}, ${t.model} at ${t.effort ?? 'its default'}${judgeable(t) ? '' : ' (not judged: level or model not checked)'}; Auto ${auto ? 'on' : 'off'}`)
 
 // Another client on the same thread (the codex TUI with --remote) changed its settings: the person's pick.
@@ -72,6 +74,7 @@ listeners.push(m => {
   const effort = s.effort ?? defaultFor(list, s.model)
   if (effort === t.effort && s.model === t.model) return
   t = { ...t, model: s.model, effort, by: 'manual' }
+  elsewhere++
   auto = false
   // The latest pick wins: one typed here and not sent yet, or the base an Auto off would put back, is dropped.
   picked = undefined
@@ -225,13 +228,21 @@ while (true) {
   const before = t
   t = remember(sent(t, carry, by), 'user', typed)
   if (carry.effort) console.log(`[effortless] ${carry.effort} (${t.by})`)
+  const ranWith = t // the thread as this turn started: its record names who chose its level, whatever came after
+  const mark = elsewhere
   const turn = await runTurn(typed, carry)
+  const changed = elsewhere !== mark
   if (decided) record(turn ? { ...decided, turn: turn.id } : decided)
   if (!turn) {
-    // Nothing was sent: the thread, a pick and an Auto off restore are as they were.
-    t = before
-    picked = pending.picked
-    restoring = pending.restoring
+    // Nothing was sent: the thread, a pick and an Auto off restore are as they were, unless another client changed
+    // the level meanwhile (that pick is the latest; only the message is taken back).
+    if (changed) {
+      t = { ...t, messages: before.messages }
+    } else {
+      t = before
+      picked = pending.picked
+      restoring = pending.restoring
+    }
     continue
   }
   // The level this turn ran at, from its own turn_context. None seen (an ephemeral thread, a rollout not written
@@ -243,12 +254,13 @@ while (true) {
     // Not written yet.
   }
   const turnId = turn.id
-  const seen = turnEffort(text, turnId, defaultFor(list, t.model))
+  const seen = turnEffort(text, turnId, defaultFor(list, ranWith.model))
   if (seen !== undefined) {
     // A turn the model never answered is not counted as run; the thread still holds the level for the next one.
-    if (turn.ran) record(appliedEvent(t, seen, Date.now(), turnId))
-    // What ran is the level in use: a level that did not take is sent again when it is picked again.
-    if (seen !== t.effort) t = { ...t, effort: seen, by: 'app' }
+    if (turn.ran) record(appliedEvent(ranWith, seen, Date.now(), turnId))
+    // What ran is the level in use: a level that did not take is sent again when it is picked again. A level another
+    // client set during the turn is newer than what the turn ran at, and stays.
+    if (!changed && seen !== t.effort) t = { ...t, effort: seen, by: 'app' }
   }
 }
 quitting = true
