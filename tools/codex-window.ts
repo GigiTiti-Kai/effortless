@@ -204,6 +204,7 @@ while (true) {
   let carry: { effort?: string } = {}
   let by: Parameters<typeof sent>[2]
   const pending = { picked, restoring } // given back if Codex refuses the turn
+  const mark = elsewhere // from before judging: a change another client makes while the judge thinks counts too
   if (picked !== undefined) {
     carry = picked !== t.effort ? { effort: picked } : {}
     by = 'manual'
@@ -229,7 +230,6 @@ while (true) {
   t = remember(sent(t, carry, by), 'user', typed)
   if (carry.effort) console.log(`[effortless] ${carry.effort} (${t.by})`)
   const ranWith = t // the thread as this turn started: its record names who chose its level, whatever came after
-  const mark = elsewhere
   const turn = await runTurn(typed, carry)
   const changed = elsewhere !== mark
   if (decided) record(turn ? { ...decided, turn: turn.id } : decided)
