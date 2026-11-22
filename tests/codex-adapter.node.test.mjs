@@ -55,6 +55,9 @@ test("resume starts from the level the thread holds; Auto off puts back the conf
   assert.deepEqual(restore(sent(resumed, { effort: 'medium' }, 'app')), {})
   // No level in the config: the thread's own is the base.
   assert.equal(threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'high' }, levels, null).base, 'high')
+  // A base the model does not list is not sent: luna has no xhigh.
+  const luna = threadFrom({ thread: { id: 'th' }, model: 'gpt-6-luna', reasoningEffort: 'low' }, levels, 'xhigh')
+  assert.deepEqual(restore(luna), {})
 })
 
 test('a level the client set that did not run is reverted; a pick of the person or the app is not', () => {
@@ -62,6 +65,8 @@ test('a level the client set that did not run is reverted; a pick of the person 
   assert.equal(appliedEvent(low, 'low', 0).reverted, undefined)
   assert.deepEqual([appliedEvent(low, 'medium', 0).reverted, appliedEvent(low, 'medium', 0).by], [true, 'app'])
   assert.equal(appliedEvent({ ...low, by: 'manual' }, 'medium', 0).reverted, undefined)
+  // Nothing read from the rollout (no turn_context yet) is not a revert.
+  assert.deepEqual([appliedEvent(low, null, 0).reverted, appliedEvent(low, null, 0).by], [undefined, 'jev'])
 })
 
 test('the core is asked about the thread as it runs: no model question, manual after a pick, commands skip the rules', async () => {

@@ -2,7 +2,7 @@
 // The Codex window client (HCM-207, route A): type messages here instead of in the codex TUI, and each one is judged
 // before Codex sees it. The judged level goes on turn/start only when it differs from the level the thread runs now.
 // Only the turns started here are judged; a plain `codex` run is not touched. Run: node tools/codex-window.ts [--resume <thread id>]
-//   /effort <level>  your pick, which wins over the judge until the judge picks again
+//   /effort <level>  your pick: Auto goes off until /auto on
 //   /auto on|off     off puts the thread's starting level back on the next turn
 //   /quit
 import { spawn } from 'node:child_process'
@@ -23,6 +23,12 @@ const record = (event: object) => recordTo(LOG, event)
 
 // Codex's app-server over stdio: one JSON message per line.
 const server = spawn(process.env.CODEX_BIN ?? 'codex', ['app-server'], { stdio: ['pipe', 'pipe', 'inherit'] })
+// The window lives as long as Codex: /quit ends its input, and Codex going away (also a crash) ends the window.
+let quitting = false
+server.on('exit', code => {
+  if (!quitting) console.error(`\n[effortless] codex app-server exited (${code})`)
+  process.exit(quitting ? 0 : 1)
+})
 let id = 0
 const waiting = new Map<number, (m: { result?: unknown; error?: unknown }) => void>()
 const listeners: ((m: { method: string; params: Record<string, unknown>; id?: number }) => void)[] = []
@@ -97,7 +103,7 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<void> 
     for (const a of approvals.splice(0)) {
       process.stdout.write(`\n[approve? ${a.method.split('/')[1]}: ${JSON.stringify(a.params.command ?? a.params.reason ?? '')}] y/N `)
       const yes = /^y/i.test((await nextLine()) ?? '')
-      reply(a.id, a.method === 'item/permissions/requestApproval' ? { permissions: yes ? a.params.permissions : {} } : { decision: yes ? 'accept' : 'decline' })
+      reply(a.id, a.method === 'item/permissions/requestApproval' ? { permissions: yes ? a.params.permissions : {}, scope: 'turn' } : { decision: yes ? 'accept' : 'decline' })
     }
     if (next === 'done') break
   }
@@ -149,12 +155,14 @@ while (true) {
     const p = turnPlan(t, d)
     carry = p.carry
     t = sent(t, carry, p.by)
-    if (d.by === 'none' && d.event.judge?.fallback) process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
+    if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
   }
   t = remember(t, 'user', typed)
   if (carry.effort) console.log(`[effortless] ${carry.effort} (${t.by})`)
   await runTurn(typed, carry)
-  const seen = rollout ? lastTurnEffort(readFileSync(rollout, 'utf8')) : null
-  record(appliedEvent(t, seen, Date.now(), turn))
+  // An ephemeral thread has no rollout: what ran is not seen, so nothing is recorded.
+  if (rollout) record(appliedEvent(t, lastTurnEffort(readFileSync(rollout, 'utf8')), Date.now(), turn))
 }
+quitting = true
 server.stdin.end()
+setTimeout(() => server.kill(), 5000).unref()

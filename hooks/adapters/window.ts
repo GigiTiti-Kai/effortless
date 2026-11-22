@@ -68,9 +68,12 @@ export function turnPlan(t: WindowThread, d: Pick<Decision, 'by' | 'effort'>): {
   return by ? { carry, by } : { carry }
 }
 
-/** Turning Auto off puts the base back on the next message, by name (Codex's null resets nothing). */
+/**
+ * Turning Auto off puts the base back on the next message, by name (Codex's null resets nothing). A base the model
+ * does not list is not sent either (Codex's base is the config's, and the model may have changed since).
+ */
 export function restore(t: WindowThread): { effort?: string } {
-  return t.base && t.effort !== t.base ? { effort: t.base } : {}
+  return t.base && t.effort !== t.base && t.levels[t.model]?.includes(t.base) ? { effort: t.base } : {}
 }
 
 /** The window client's own commands. /effort <level> is the person's pick: it wins over the judge (decision 3). */
@@ -99,10 +102,11 @@ export function chooser(d: Pick<Decision, 'by' | 'effort'>): AppliedEvent['by'] 
 
 /**
  * The record of the level a turn ran at (Codex: turn_context.effort in the rollout; ACP: the option read back).
- * reverted: the client set the level and the turn ran at another one, with nobody changing it.
+ * reverted: the client set the level and the turn ran at another one, with nobody changing it. Nothing seen (no
+ * turn_context read) is not a revert.
  */
 export function appliedEvent(t: WindowThread, seen: AppliedLevel | null, now: number, turn?: string): AppliedEvent {
-  const reverted = t.by !== 'manual' && t.by !== 'app' && seen !== t.effort
+  const reverted = seen !== null && t.by !== 'manual' && t.by !== 'app' && seen !== t.effort
   return {
     v: 1,
     harness: t.harness,

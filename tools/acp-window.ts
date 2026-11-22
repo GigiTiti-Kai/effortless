@@ -29,6 +29,12 @@ const record = (event: object) => recordTo(LOG, event)
 
 const [bin, ...args] = AGENTS[harness]
 const agent = spawn(process.env[`${harness.toUpperCase()}_BIN`] ?? bin, args, { stdio: ['pipe', 'pipe', 'ignore'] })
+// The window lives as long as the agent: /quit ends its input, and the agent going away (also a crash) ends the window.
+let quitting = false
+agent.on('exit', code => {
+  if (!quitting) console.error(`\n[effortless] ${harness} exited (${code})`)
+  process.exit(quitting ? 0 : 1)
+})
 let id = 0
 const waiting = new Map<number, (m: { result?: unknown; error?: unknown }) => void>()
 type Note = { method: string; params: Record<string, unknown>; id?: number }
@@ -99,7 +105,9 @@ async function runTurn(text: string) {
       const p = m.params as { toolCall?: { title?: string }; options?: { optionId: string; kind?: string }[] }
       process.stdout.write(`\n[approve? ${p.toolCall?.title ?? 'a tool'}] y/N `)
       const yes = /^y/i.test((await nextLine()) ?? '')
-      const pick = p.options?.find(o => String(o.kind ?? '').startsWith(yes ? 'allow' : 'reject'))
+      // A plain y or n answers this call only: the *_once option when the agent offers one.
+      const once = p.options?.find(o => o.kind === (yes ? 'allow_once' : 'reject_once'))
+      const pick = once ?? p.options?.find(o => String(o.kind ?? '').startsWith(yes ? 'allow' : 'reject'))
       reply(m.id, { outcome: pick ? { outcome: 'selected', optionId: pick.optionId } : { outcome: 'cancelled' } })
     }
   }
@@ -153,7 +161,7 @@ while (true) {
     const p = turnPlan(t, d)
     carry = p.carry
     by = p.by
-    if (d.by === 'none' && d.event.judge?.fallback) process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
+    if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
   }
   const wanted = carry.effort
   if (wanted) await setEffort(wanted)
@@ -165,4 +173,6 @@ while (true) {
   if (ran !== t.effort) t = { ...t, effort: ran, by: 'app' }
   await runTurn(typed)
 }
+quitting = true
 agent.stdin.end()
+setTimeout(() => agent.kill(), 5000).unref()

@@ -57,10 +57,17 @@ function jevKey(): string | undefined {
  */
 function askHaiku(system: string, prompt: string): Promise<{ text: string; tokens: number } | undefined> {
   const cwd = join(tmpdir(), 'effortless-window-haiku')
-  mkdirSync(cwd, { recursive: true })
   const args = ['-p', '--safe-mode', '--model', 'claude-haiku-5-5', '--tools', '', '--strict-mcp-config', '--no-session-persistence', '--output-format', 'json', '--system-prompt', system]
+  // Haiku failing in any way is "no answer": the window keeps the level and the message still goes (never a crash).
   return new Promise(resolve => {
+    try {
+      mkdirSync(cwd, { recursive: true })
+    } catch {
+      return resolve(undefined)
+    }
     const child = spawn(process.env.CLAUDE_BIN ?? 'claude', args, { cwd, stdio: ['pipe', 'pipe', 'ignore'] })
+    // claude gone before it read the prompt (EPIPE): 'close' resolves.
+    child.stdin.on('error', () => undefined)
     let out = ''
     const timer = setTimeout(() => child.kill('SIGTERM'), HAIKU_TIMEOUT_MS)
     child.stdout.on('data', b => (out += b))
