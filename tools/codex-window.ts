@@ -98,13 +98,15 @@ const NOT_MODEL = new Set(['userMessage', 'hookPrompt', 'contextCompaction', 'en
 
 /**
  * Runs one turn to its end, printing the reply; approvals are asked on the terminal. Returns the turn's id, or nothing
- * when Codex refused to start it. ran: the model answered at least once. A turn it never answered ran at no level: one
- * a local hook stopped before the model was asked (completed, no request), or one the Responses API refused (a 400).
+ * when Codex refused to start it. ran: the model answered at least once: it made an item, or Codex counted tokens for
+ * this turn (a refusal-only reply makes no item but uses tokens). A turn it never answered ran at no level: one a local
+ * hook stopped before the model was asked (completed, no request), or one the Responses API refused (a 400).
  */
 async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: string; ran: boolean } | undefined> {
   let answer = ''
   let streamed = false
   let answered = false
+  const used = new Set<string>() // turns Codex reported tokens for
   let resolveDone!: () => void
   const done = new Promise<void>(r => (resolveDone = r))
   const approvals: { id: number; method: string; params: Record<string, unknown> }[] = []
@@ -119,6 +121,8 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: 
     if (m.method.startsWith('item/') && item?.type === 'fileChange' && item.id && item.changes) changes.set(item.id, item.changes)
     if (m.method === 'item/completed' && item?.type === 'agentMessage') answer = String(item.text ?? '')
     if (m.method === 'item/completed' && item?.type && !NOT_MODEL.has(item.type)) answered = true
+    const usage = m.params?.tokenUsage as { last?: { totalTokens?: number } } | undefined
+    if (m.method === 'thread/tokenUsage/updated' && (usage?.last?.totalTokens ?? 0) > 0) used.add(String(m.params.turnId))
     if (m.method === 'hook/completed') {
       // A hook that stopped the message: say so and why, or the window shows only an empty line.
       const run = m.params.run as { eventName?: string; status?: string; entries?: { text?: string }[] } | undefined
@@ -158,7 +162,9 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: 
   listeners.splice(listeners.indexOf(on), 1)
   process.stdout.write(streamed ? '\n' : `${answer}\n`)
   t = remember(t, 'assistant', answer)
-  return { id: started.turn.id, ran: answered }
+  // The model was asked and answered with nothing to show (a refusal-only reply): say so rather than print an empty line.
+  if (!answered && used.has(started.turn.id)) console.log('[effortless] the model gave no message (a refusal or an empty reply)')
+  return { id: started.turn.id, ran: answered || used.has(started.turn.id) }
 }
 
 while (true) {
