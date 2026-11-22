@@ -73,6 +73,9 @@ listeners.push(m => {
   if (effort === t.effort && s.model === t.model) return
   t = { ...t, model: s.model, effort, by: 'manual' }
   auto = false
+  // The latest pick wins: one typed here and not sent yet, or the base an Auto off would put back, is dropped.
+  picked = undefined
+  restoring = false
   console.log(`\n[effortless] ${s.model} at ${effort} set elsewhere: Auto off`)
 })
 

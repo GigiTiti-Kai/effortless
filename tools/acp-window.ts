@@ -67,16 +67,18 @@ let picked: string | undefined
 let setting = false
 console.log(`[effortless] ${harness} session ${t.id}, ${t.model} at ${t.effort ?? 'no effort option'}${judgeable(t) ? '' : ' (not judged)'}; Auto ${auto ? 'on' : 'off'}`)
 
-/** Sets the effort and reads it back: what the agent reports is the level in use. */
-async function setEffort(level: string) {
+/** Sets the effort and reads it back: what the agent reports is the level in use. false: the agent refused it. */
+async function setEffort(level: string): Promise<boolean> {
   setting = true
   try {
     const r = await call<{ configOptions?: ConfigOption[] }>('session/set_config_option', { sessionId: t.id, configId: EFFORT_OPTION[harness], value: level })
     const back = sessionFrom(harness, t.id, r.configOptions ?? [])
     t = { ...t, effort: back.effort ?? t.effort }
+    return true
   } catch (error) {
-    // Refused: the level stays, and the turn is recorded as a set that did not take.
+    // Refused: the level stays.
     console.log(`[effortless] ${harness} refused ${level}: ${error instanceof Error ? error.message : error}`)
+    return false
   } finally {
     setting = false
   }
@@ -91,6 +93,9 @@ listeners.push(m => {
   // Any change is the person's, also after an earlier pick of theirs: Auto goes off, so a verdict in flight is dropped.
   if (next.effort !== t.effort || next.model !== t.model) {
     auto = false
+    // The latest pick wins: one typed here and not sent yet, or the base an Auto off would put back, is dropped.
+    picked = undefined
+    restoring = false
     console.log(`\n[effortless] ${next.model} at ${next.effort} set elsewhere: Auto off`)
   }
   t = next
@@ -181,6 +186,7 @@ while (true) {
   const turn = String(turns)
   let carry: { effort?: string } = {}
   let by: Parameters<typeof sent>[2]
+  const pending = { picked, restoring } // given back if the agent refuses the level
   if (picked !== undefined) {
     carry = picked !== t.effort ? { effort: picked } : {}
     by = 'manual'
@@ -203,10 +209,18 @@ while (true) {
     }
   }
   const wanted = carry.effort
-  if (wanted) await setEffort(wanted)
+  const refused = wanted !== undefined && !(await setEffort(wanted))
+  // A pick or the base the agent refused goes again before the next message, and the thread stays as it was (its
+  // level and who chose it). A refused judged level is recorded as a set that did not take; the next message is judged.
+  const kept = refused && (pending.picked !== undefined || pending.restoring)
+  if (kept) {
+    picked = pending.picked
+    restoring = pending.restoring
+    console.log(`[effortless] ${wanted} goes again before the next message`)
+  }
   // What the agent read back is the level the prompt runs at; a set that did not take is recorded as reverted.
   const ran = t.effort
-  t = remember(sent({ ...t, effort: wanted ?? t.effort }, {}, by), 'user', typed)
+  t = remember(kept ? t : sent({ ...t, effort: wanted ?? t.effort }, {}, by), 'user', typed)
   if (wanted) console.log(`[effortless] ${ran} (${t.by})`)
   const applied = appliedEvent(t, ran, Date.now(), turn)
   if (ran !== t.effort) t = { ...t, effort: ran, by: 'app' }
