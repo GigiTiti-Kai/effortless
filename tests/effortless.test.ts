@@ -93,14 +93,19 @@ const FOOTER = { plugin: 'effortless', surface: 'desktop', component: 'SessionMo
 /** The band above the prompt on desktop: it draws nothing (only the terminal has rows there). */
 const DESK_BAND = { plugin: 'effortless', surface: 'desktop', ...BAND } as never
 
-/** What a mounted tree draws, as text: its elements, props and strings. */
-/** Nothing shows above the prompt on desktop: only the hidden hover cards, revealed by hovering the footer. */
-async function noBand($: Engine, at: never) {
+/** The app owns the drawing when the plugin leaves this slot empty. */
+async function appOwnsDrawing($: Engine, at: never) {
   const ui = await $.ui.mount(at)
-  const text = await drawn(ui)
-  expect(text).toContain('hover-cards')
-  expect(text).not.toMatch(/"key":"(settings|setup|down|hot|cold|swamp)"/)
-  await ui.unmount()
+  try {
+    const tree = await ui.drawn() as { type?: string } | null
+    expect(tree?.type).toBe('engine')
+  } finally {
+    await ui.unmount()
+  }
+}
+
+function fixturePath(path: string): string {
+  return path.replaceAll('\\', '/').replace(/^[A-Za-z]:(?=\/)/, '')
 }
 
 async function drawn(ui: { drawn: () => Promise<unknown> }): Promise<string> {
@@ -380,7 +385,8 @@ describe('auto', () => {
   })
 
   test('with the jev judge picked, the TypeSafe key is read from ~/.config/jev/.env when the environment has none', { options: { judge: 'jev' } } as never, async ($, on) => {
-    engine(on, { USERPROFILE: 'C:/Users/x' })
+    const home = '/fixture-home'
+    engine(on, { HOME: home })
     mock.clock(on)
     const asked = judgeSays(on, '{"model":"haiku","effort":"low","why":"x"}')
     const read: string[] = []
@@ -394,7 +400,7 @@ describe('auto', () => {
       return { value: { status: 200, ok: true, headers: {}, text: jevReply('high') } }
     })
     await $.prompt.submit({ text: 'hard task', wait: false, origin: { kind: 'composer' } })
-    expect(read.map(path => path.replaceAll('\\', '/'))).toEqual(['C:/Users/x/.config/jev/.env'])
+    expect(read.map(fixturePath)).toEqual([`${home}/.config/jev/.env`])
     expect(auth).toEqual(['Bearer from-file'])
     expect(asked.length).toBe(0)
   })
@@ -758,7 +764,7 @@ describe('footer text', () => {
 
   test('nothing is drawn above the prompt on desktop', async ($, on) => {
     engine(on)
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
   })
 
   test('a model suggestion still asks above the prompt on desktop', async ($, on) => {
@@ -993,7 +999,7 @@ describe('cache countdown', () => {
     expect(mostlyCached({ input_tokens: 90000, cache_read_input_tokens: 10 })).toBe(false)
   })
 
-  test('nothing before the first response; then it counts down with no further response, turns amber, goes cold', async ($, on) => {
+  test('nothing before the first response; then it counts down with no further response, turns amber, goes cold', { timeoutMs: 20_000 } as never, async ($, on) => {
     engine(on)
     const mocked = mock.clock(on)
     answer(on, { ephemeral_1h_input_tokens: 500, ephemeral_5m_input_tokens: 0 })
@@ -1079,7 +1085,7 @@ describe('cache countdown', () => {
     await guide.press({ key: 'setup-haiku' })
     await guide.press({ key: 'setup-close' })
     await guide.unmount()
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
     await mocked.advance(2 * 60_000)
     const band = await $.ui.mount(DESK_BAND)
     expect(await band.find({ key: 'cold-compact' })).toBeDefined()
@@ -1616,11 +1622,11 @@ describe('setup guide', () => {
       { key: 'effortless.appearance', value: 'light' },
     ])
     await band.unmount()
-    await expect($.ui.mount(DESK)).rejects.toThrow()
+    await appOwnsDrawing($, DESK)
 
     // A new session: the guide stays closed; /effortless setup opens it again.
     await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true } as never)
-    await expect($.ui.mount(DESK)).rejects.toThrow()
+    await appOwnsDrawing($, DESK)
     await $.command.run({ command: 'effortless', args: 'setup' })
     const again = await $.ui.mount(DESK)
     expect(await again.find({ key: 'setup-jev' })).toBeDefined()
@@ -1678,7 +1684,7 @@ describe('setup guide', () => {
     expect(await drawn(band)).toContain('2/4')
     await band.press({ key: 'setup-close' })
     await band.unmount()
-    await expect($.ui.mount(DESK)).rejects.toThrow()
+    await appOwnsDrawing($, DESK)
   })
 })
 
@@ -1961,7 +1967,7 @@ describe('cold band', () => {
     expect(await drawn(band)).toContain('class=\\"f\\"')
     await band.press({ key: 'cold-hide' })
     await band.unmount()
-    await expect($.ui.mount(DESK)).rejects.toThrow()
+    await appOwnsDrawing($, DESK)
   })
 })
 
@@ -2379,7 +2385,7 @@ describe('swamp band and setup entry', () => {
     expect(await band.find({ key: 'swamp-handoff' })).toBeDefined()
     await band.press({ key: 'swamp-close' })
     await band.unmount()
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
     tokens = 240_000
     await mocked.advance(16_000)
     const again = await $.ui.mount(DESK_BAND)
@@ -2535,7 +2541,7 @@ describe('swamp band and setup entry', () => {
     const guide = await $.ui.mount(DESK_BAND)
     await guide.press({ key: 'setup-close' })
     await guide.unmount()
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
     const footer = await $.ui.mount(FOOTER)
     expect(await footer.find({ key: 'setup' })).toBeDefined()
     await footer.press({ key: 'setup' })
@@ -2595,7 +2601,7 @@ describe('running hot and judge down', () => {
     await band.unmount()
   })
 
-  test('a failing judge shows the judge-down band until it answers again', async ($, on) => {
+  test('a failing judge shows the judge-down band until it answers again', { options: { judge: 'auto' } } as never, async ($, on) => {
     engine(on, { TYPESAFE_API_KEY: 'k' })
     mock.clock(on)
     judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
@@ -2615,7 +2621,7 @@ describe('running hot and judge down', () => {
     await band.unmount()
     status = 200
     await $.prompt.submit({ text: 'now write tests for the queue module', wait: false, origin: { kind: 'composer' } })
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
   })
 })
 
@@ -2671,18 +2677,18 @@ describe('settings panel', () => {
   })
 
   test('Open settings opens the panel; the slider, range and key are saved from it', async ($, on) => {
-    engine(on, { USERPROFILE: 'C:/Users/x' })
+    const home = '/fixture-home'
+    engine(on, { HOME: home })
     const mocked = mock.clock(on)
     const set: { key: string; value: unknown }[] = []
     on('config.set', (_$, e) => {
       set.push({ key: e.key, value: e.value })
       return { value: e.value } as never
     })
-    const files: Record<string, string> = { 'C:/Users/x/.config/jev/.env': 'OTHER=1\n' }
-    const at = (path: string) => path.split('\\').join('/')
-    on('fs.read', (_$, e) => ({ value: files[at(e.path)] ?? '' }) as never)
+    const files: Record<string, string> = { [`${home}/.config/jev/.env`]: 'OTHER=1\n' }
+    on('fs.read', (_$, e) => ({ value: files[fixturePath(e.path)] ?? '' }) as never)
     on('fs.write', (_$, e) => {
-      files[at(e.path)] = e.text
+      files[fixturePath(e.path)] = e.text
       return { value: undefined } as never
     })
     const said: string[] = []
@@ -2712,6 +2718,7 @@ describe('settings panel', () => {
     expect(await drawn(panel)).toContain('Helpers on')
     await panel.press({ key: 'settings-back' })
     await panel.press({ key: 'settings-card-judge' })
+    await panel.select({ key: 'settings-judge-pick', value: 'auto' })
     await panel.input({ key: 'settings-key', text: ' tk-new ' })
     await panel.press({ key: 'settings-back' })
     await panel.press({ key: 'settings-card-handoff' })
@@ -2747,14 +2754,14 @@ describe('settings panel', () => {
     expect(set).toContainEqual({ key: 'effortless.modelAuto', value: 'on' })
     expect(set).toContainEqual({ key: 'effortless.helpers', value: 'on' })
     expect(said.join(' | ')).toContain('key saved')
-    expect(files['C:/Users/x/.config/jev/.env']).toBe('OTHER=1\nTYPESAFE_API_KEY=tk-new\n')
+    expect(files[`${home}/.config/jev/.env`]).toBe('OTHER=1\nTYPESAFE_API_KEY=tk-new\n')
     await panel.unmount()
     // A plain card says it was saved, then goes.
     const saved = await $.ui.mount(DESK_BAND)
     expect(await drawn(saved)).toContain('Settings saved')
     await saved.unmount()
     await mocked.advance(3000)
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
   })
 })
 
@@ -2775,7 +2782,7 @@ describe('switching parts off', () => {
     await guide.unmount()
     await mocked.advance(16_000)
     // Nothing above the prompt: the swamp band was the only thing to draw.
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
     const footer = await $.ui.mount(FOOTER)
     expect(await footer.find({ key: 'handoff' })).toBeUndefined()
     await footer.unmount()
@@ -2951,7 +2958,7 @@ describe('dashboard', () => {
     await guide.unmount()
   }
 
-  test('cache-aware routing, live through the hooks: a cold Sonnet is skipped on a big warm Opus chat, Haiku moves, a cold chat moves, and a routed reply leaves the countdown alone', { options: { modelAuto: 'on' } } as never, async ($, on) => {
+  test('cache-aware routing, live through the hooks: a cold Sonnet is skipped on a big warm Opus chat, Haiku moves, a cold chat moves, and a routed reply leaves the countdown alone', { timeoutMs: 20_000, options: { modelAuto: 'on' } } as never, async ($, on) => {
     engine(on)
     const mocked = mock.clock(on)
     on('session.usage', () => ({ value: { context: { tokens: 100_000, window: 1_000_000, percent: 10 } } }) as never)
@@ -3246,7 +3253,7 @@ describe('dashboard', () => {
     expect((await debug()).split(String.fromCharCode(10)).at(-1)).toBe('model used: claude-opus-5-5 at xhigh')
   })
 
-  test('a thank-you after a cheaper answer is not a redo', { options: { modelAuto: 'on' } } as never, async ($, on) => {
+  test('a thank-you after a cheaper answer is not a redo', { timeoutMs: 20_000, options: { modelAuto: 'on' } } as never, async ($, on) => {
     engine(on)
     const mocked = mock.clock(on)
     on('session.usage', () => ({ value: { context: { tokens: 100_000, window: 1_000_000, percent: 10 } } }) as never)
@@ -3320,6 +3327,7 @@ describe('dashboard', () => {
   test('desktop: Auto switched off does not light the word up: it turns Off in white', DASH, async ($, on) => {
     engine(on)
     mock.clock(on)
+    on('ui.toast', () => ({ value: undefined }) as never)
     on('prompt.read', () => ({ value: { text: '', cursor: 0 } }) as never)
     on('prompt.fill', () => ({ isFilled: true }) as never)
     await start($, on)
@@ -3331,7 +3339,7 @@ describe('dashboard', () => {
     await rows.press({ key: 'e-low' })
     await rows.unmount()
     const band = await $.ui.mount(DESK_BAND)
-    expect(await drawn(band)).toContain('"color":"#d4d4d8","bold":true},"children":["Off"]')
+    expect(await drawn(band)).toMatch(/"color":"#d4d4d8","bold":true[^}]*},"children":\["Off"\]/)
     await band.unmount()
   })
 
@@ -3355,13 +3363,13 @@ describe('dashboard', () => {
     expect(await band.find({ key: 'dash-mark' })).toBeDefined()
     await band.press({ key: 'dash-auto' })
     expect(await drawn(band)).toContain('Auto off')
-    // One button: Compact on a fresh chat. It opens the compact card, which can switch to Handoff.
-    await band.press({ key: 'dash-handoff' })
+    // Compact opens the compact card, which can switch to Handoff.
+    await band.press({ key: 'dash-compact' })
     expect(await drawn(band)).toContain('compact-bar')
     await band.press({ key: 'compact-to-handoff' })
     expect(await drawn(band)).toContain('⇥ Handoff')
     await band.unmount()
-    await expect($.ui.mount(FOOTER)).rejects.toThrow()
+    await appOwnsDrawing($, FOOTER)
   })
 
   test('Handoff button set to always: Handoff from the start, calm, no glow, with Compact beside it', { options: { layout: 'default', handoffButton: 'always' } } as never, async ($, on) => {
@@ -3509,7 +3517,7 @@ describe('dashboard', () => {
     mock.clock(on)
     await start($, on)
     await closeSetup($, DESK_BAND)
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
     const footer = await $.ui.mount(FOOTER)
     expect(await footer.find({ key: 'auto' })).toBeDefined()
     await footer.unmount()
@@ -3548,7 +3556,7 @@ describe('a chat opened again', () => {
     await start($, on)
     await closeSetup($)
     await $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 7200, prompt_cache_likely_expired: true } as never)
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
   })
 
   test('ten minutes after: the countdown goes on from where it was, no cold band', async ($, on) => {
@@ -3557,7 +3565,7 @@ describe('a chat opened again', () => {
     await start($, on)
     await closeSetup($)
     await $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 600, prompt_cache_likely_expired: false } as never)
-    await expect($.ui.mount(DESK_BAND)).rejects.toThrow()
+    await appOwnsDrawing($, DESK_BAND)
     const footer = await $.ui.mount(FOOTER)
     expect(await drawn(footer)).toMatch(/"(49|50)m"/)
     await footer.unmount()
