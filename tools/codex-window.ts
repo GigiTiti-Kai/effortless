@@ -54,7 +54,7 @@ const reply = (n: number, result: object) => server.stdin.write(JSON.stringify({
 await call('initialize', { clientInfo: { name: 'effortless-codex-window', version: '1' } })
 server.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n')
 const list = await call<ModelList>('model/list', {})
-type Opened = { thread: { id: string; path: string | null }; model: string; reasoningEffort: string | null }
+type Opened = Parameters<typeof threadFrom>[0] & { thread: { path: string | null } }
 const opened = await call<Opened>(opt.resume ? 'thread/resume' : 'thread/start', opt.resume ? { threadId: opt.resume } : {})
 // The base is the config's level: a resumed thread may hold one this client chose last time.
 const config = await call<{ config: { model_reasoning_effort?: string | null } }>('config/read', {}).catch(() => undefined)
@@ -95,11 +95,14 @@ function question(a: { method: string; params: Record<string, unknown> }, change
 
 /**
  * Runs one turn to its end, printing the reply; approvals are asked on the terminal. Returns the turn's id, or nothing
- * when Codex refused to start it.
+ * when Codex refused to start it. ran: the model answered at least once (a turn that failed before any reply, such as
+ * a Responses API 400, ran at no level).
  */
-async function runTurn(text: string, carry: { effort?: string }): Promise<string | undefined> {
+async function runTurn(text: string, carry: { effort?: string }): Promise<{ id: string; ran: boolean } | undefined> {
   let answer = ''
   let streamed = false
+  let answered = false
+  let failed = false
   let resolveDone!: () => void
   const done = new Promise<void>(r => (resolveDone = r))
   const approvals: { id: number; method: string; params: Record<string, unknown> }[] = []
@@ -113,6 +116,7 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
     const item = m.params?.item as { type?: string; id?: string; text?: string; changes?: Change[] } | undefined
     if (m.method.startsWith('item/') && item?.type === 'fileChange' && item.id && item.changes) changes.set(item.id, item.changes)
     if (m.method === 'item/completed' && item?.type === 'agentMessage') answer = String(item.text ?? '')
+    if (m.method === 'item/completed' && item?.type && item.type !== 'userMessage') answered = true
     if (m.id !== undefined && /requestApproval$/.test(m.method)) approvals.push(m as never)
     else if (m.id !== undefined) {
       // Codex asks something this client cannot show (user input, an MCP form, a client tool): say no, so the turn goes on.
@@ -122,6 +126,7 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
     if (m.method === 'turn/completed') {
       // A turn the model refused or that broke off ends too: say so, or the window shows only an empty line.
       const turn = m.params.turn as { status?: string; error?: { message?: string } | null } | undefined
+      failed = turn?.status === 'failed'
       if (turn?.status && turn.status !== 'completed') process.stdout.write(`\n[effortless] the turn ${turn.status}${turn.error?.message ? `: ${turn.error.message}` : ''}\n`)
       resolveDone()
     }
@@ -147,7 +152,7 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
   listeners.splice(listeners.indexOf(on), 1)
   process.stdout.write(streamed ? '\n' : `${answer}\n`)
   t = remember(t, 'assistant', answer)
-  return started.turn.id
+  return { id: started.turn.id, ran: answered || !failed }
 }
 
 while (true) {
@@ -205,9 +210,9 @@ while (true) {
   const before = t
   t = remember(sent(t, carry, by), 'user', typed)
   if (carry.effort) console.log(`[effortless] ${carry.effort} (${t.by})`)
-  const turnId = await runTurn(typed, carry)
-  if (decided) record(turnId ? { ...decided, turn: turnId } : decided)
-  if (!turnId) {
+  const turn = await runTurn(typed, carry)
+  if (decided) record(turn ? { ...decided, turn: turn.id } : decided)
+  if (!turn) {
     // Nothing was sent: the thread, a pick and an Auto off restore are as they were.
     t = before
     picked = pending.picked
@@ -222,9 +227,11 @@ while (true) {
   } catch {
     // Not written yet.
   }
+  const turnId = turn.id
   const seen = turnEffort(text, turnId, defaultFor(list, t.model))
   if (seen !== undefined) {
-    record(appliedEvent(t, seen, Date.now(), turnId))
+    // A turn the model never answered is not counted as run; the thread still holds the level for the next one.
+    if (turn.ran) record(appliedEvent(t, seen, Date.now(), turnId))
     // What ran is the level in use: a level that did not take is sent again when it is picked again.
     if (seen !== t.effort) t = { ...t, effort: seen, by: 'app' }
   }

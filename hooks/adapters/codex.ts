@@ -17,16 +17,30 @@ export function defaultFor(list: ModelList, model: string): string | null {
   return list.data.find(m => m.id === model)?.defaultReasoningEffort ?? null
 }
 
+/** A turn as thread/resume returns it, as far as the context reads it. */
+type Turn = { items?: { type: string; text?: string; content?: { type: string; text?: string }[] }[] }
+
+/** The conversation a resumed thread brings back (its turns' user and agent messages), for the judge's context. */
+export function messagesFrom(turns: readonly Turn[] | undefined): WindowThread['messages'] {
+  const messages: WindowThread['messages'] = []
+  for (const item of (turns ?? []).flatMap(turn => turn.items ?? [])) {
+    if (item.type === 'userMessage') messages.push({ role: 'user', text: (item.content ?? []).filter(c => c.type === 'text').map(c => c.text ?? '').join('\n') })
+    if (item.type === 'agentMessage') messages.push({ role: 'assistant', text: item.text ?? '' })
+  }
+  return messages.slice(-4)
+}
+
 /**
  * The thread's state from a thread/start or thread/resume response. effort: the response's level, else the model's
  * default (model/list). base: the level Auto off puts back: the config's model_reasoning_effort (config/read), else the
  * model's default. A resumed thread runs at its last level, which may be one the window client chose, so the base is
- * never taken from the thread while a configured or default level is known.
+ * never taken from the thread while a configured or default level is known. messages: what a resumed thread said
+ * last, so a reply to its last question is judged as one.
  */
-export function threadFrom(res: { thread: { id: string }; model: string; reasoningEffort: string | null }, list: ModelList, base?: string | null): WindowThread {
+export function threadFrom(res: { thread: { id: string; turns?: Turn[] }; model: string; reasoningEffort: string | null }, list: ModelList, base?: string | null): WindowThread {
   const fallback = defaultFor(list, res.model)
   const effort = res.reasoningEffort ?? fallback
-  return { harness: 'codex', id: res.thread.id, model: res.model, effort, by: 'app', base: base ?? fallback ?? effort, levels: levelsFrom(list), messages: [] }
+  return { harness: 'codex', id: res.thread.id, model: res.model, effort, by: 'app', base: base ?? fallback ?? effort, levels: levelsFrom(list), messages: messagesFrom(res.thread.turns) }
 }
 
 /**

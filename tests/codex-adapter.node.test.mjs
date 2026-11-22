@@ -56,6 +56,19 @@ test('no effort in the config: the thread runs at the model default, is judged, 
   assert.equal(judgeable(threadFrom({ thread: { id: 'th' }, model: 'gpt-6-luna', reasoningEffort: null }, list, null)), false)
 })
 
+test('a resumed thread brings back its last question, so a yes to it is judged rather than kept as a go-ahead', async () => {
+  const turns = [
+    { items: [{ type: 'userMessage', content: [{ type: 'text', text: 'fix the build' }] }, { type: 'agentMessage', text: 'Fixed.' }] },
+    { items: [{ type: 'userMessage', content: [{ type: 'text', text: 'refactor the parser' }] }, { type: 'reasoning' }, { type: 'agentMessage', text: 'Done. Shall I also update the docs?' }] },
+  ]
+  const resumed = threadFrom({ thread: { id: 'th', turns }, model: 'gpt-6.2-sol', reasoningEffort: 'high' }, list, 'medium')
+  assert.equal(inputFor(resumed, 'yes', settings, true).context, 'user: refactor the parser\nassistant: Done. Shall I also update the docs?')
+  const d = await decide(inputFor(resumed, 'yes', settings, true), jev('medium'))
+  assert.deepEqual([d.by, d.effort], ['jev', 'medium'])
+  // A new thread has no turns: nothing to bring back.
+  assert.deepEqual(opened.messages, [])
+})
+
 test("resume starts from the level the thread holds; Auto off puts back the config's level, not that one", () => {
   const resumed = threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'low' }, list, 'medium')
   assert.deepEqual([resumed.effort, resumed.base, resumed.by], ['low', 'medium', 'app'])
