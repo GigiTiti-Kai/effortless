@@ -31,15 +31,16 @@ export function threadFrom(res: { thread: { id: string }; model: string; reasoni
 
 /**
  * The level one turn ran at: the effort of the rollout's turn_context for that turn id (the last one, when Codex wrote
- * several). undefined when the turn has none yet: an earlier turn's level is never taken for this one.
+ * several). Codex writes null for a turn run at the model's default (nothing configured or sent): that is `fallback`.
+ * undefined when the turn has none yet: an earlier turn's level is never taken for this one.
  */
-export function turnEffort(rollout: string, turnId: string): AppliedLevel | null | undefined {
+export function turnEffort(rollout: string, turnId: string, fallback: AppliedLevel | null = null): AppliedLevel | null | undefined {
   let effort: AppliedLevel | null | undefined
   for (const line of rollout.split('\n')) {
     if (!line.includes('"turn_context"') || !line.includes(turnId)) continue
     try {
       const e = JSON.parse(line) as { type?: string; payload?: { turn_id?: string; effort?: string | null } }
-      if (e.type === 'turn_context' && e.payload?.turn_id === turnId) effort = e.payload.effort ?? null
+      if (e.type === 'turn_context' && e.payload?.turn_id === turnId) effort = e.payload.effort ?? fallback
     } catch {
       // A line cut short while Codex writes it: the earlier one stands.
     }

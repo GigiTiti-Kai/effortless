@@ -3,7 +3,7 @@
 // before Codex sees it. The judged level goes on turn/start only when it differs from the level the thread runs now.
 // Only the turns started here are judged; a plain `codex` run is not touched. Run: node tools/codex-window.ts [--resume <thread id>]
 //   /effort <level>  your pick: Auto goes off until /auto on
-//   /auto on|off     off puts the config's level (model_reasoning_effort) back on the next turn
+//   /auto on|off     off puts the config's level (model_reasoning_effort, else the model's default) back on the next turn
 //   /quit
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -136,7 +136,8 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
     for (const a of approvals.splice(0)) {
       const shownAt = Date.now()
       process.stdout.write(`\n[approve ${asked(a, files)}] y/N `)
-      const yes = /^y/i.test((await nextLine(shownAt)) ?? '')
+      // Only y or yes grants: a message that merely starts with y ("yes, that report...") declines.
+      const yes = /^\s*(y|yes)\s*$/i.test((await nextLine(shownAt)) ?? '')
       reply(a.id, a.method === 'item/permissions/requestApproval' ? { permissions: yes ? a.params.permissions : {}, scope: 'turn' } : { decision: yes ? 'accept' : 'decline' })
     }
     if (next === 'done') break
@@ -177,6 +178,7 @@ while (true) {
   let decided: object | undefined
   let carry: { effort?: string } = {}
   let by: Parameters<typeof sent>[2]
+  const pending = { picked, restoring } // given back if Codex refuses the turn
   if (picked !== undefined) {
     carry = picked !== t.effort ? { effort: picked } : {}
     by = 'manual'
@@ -204,7 +206,10 @@ while (true) {
   const turnId = await runTurn(typed, carry)
   if (decided) record(turnId ? { ...decided, turn: turnId } : decided)
   if (!turnId) {
-    t = before // nothing was sent: the thread is as it was
+    // Nothing was sent: the thread, a pick and an Auto off restore are as they were.
+    t = before
+    picked = pending.picked
+    restoring = pending.restoring
     continue
   }
   // The level this turn ran at, from its own turn_context. None seen (an ephemeral thread, a rollout not written
@@ -215,7 +220,7 @@ while (true) {
   } catch {
     // Not written yet.
   }
-  const seen = turnEffort(text, turnId)
+  const seen = turnEffort(text, turnId, defaultFor(list, t.model))
   if (seen !== undefined) {
     record(appliedEvent(t, seen, Date.now(), turnId))
     // What ran is the level in use: a level that did not take is sent again when it is picked again.

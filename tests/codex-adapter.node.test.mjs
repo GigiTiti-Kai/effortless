@@ -133,6 +133,10 @@ test("the turn's own turn_context names the level it ran at; another turn's neve
   assert.equal(turnEffort(rollout, 't3'), undefined)
   assert.equal(turnEffort(rollout, 't4'), undefined)
   assert.equal(turnEffort('', 't1'), undefined)
+  // Real Codex 0.171.0 writes effort null for a turn at the model default (nothing configured or sent).
+  const atDefault = JSON.stringify({ type: 'turn_context', payload: { turn_id: 't5', effort: null } })
+  assert.equal(turnEffort(atDefault, 't5', 'low'), 'low')
+  assert.equal(turnEffort(atDefault, 't5'), null)
 })
 
 test('the context is the last user message and the end of the last reply, as Claude Code sends it', () => {

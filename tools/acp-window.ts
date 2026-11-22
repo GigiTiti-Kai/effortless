@@ -73,6 +73,9 @@ async function setEffort(level: string) {
     const r = await call<{ configOptions?: ConfigOption[] }>('session/set_config_option', { sessionId: t.id, configId: EFFORT_OPTION[harness], value: level })
     const back = sessionFrom(harness, t.id, r.configOptions ?? [])
     t = { ...t, effort: back.effort ?? t.effort }
+  } catch (error) {
+    // Refused: the level stays, and the turn is recorded as a set that did not take.
+    console.log(`[effortless] ${harness} refused ${level}: ${error instanceof Error ? error.message : error}`)
   } finally {
     setting = false
   }
@@ -95,7 +98,8 @@ listeners.push(m => {
 /** Runs one prompt to its end. false: the agent refused it, and nothing ran. */
 async function runTurn(text: string): Promise<boolean> {
   let answer = ''
-  const on = async (m: Note) => {
+  let asking = Promise.resolve() // one approval on screen at a time: the next waits for the answer to this one
+  const on = (m: Note) => {
     if (m.method === 'session/update' && m.params.sessionId === t.id) {
       const u = m.params.update as { sessionUpdate?: string; content?: { text?: string } }
       if (u.sessionUpdate === 'agent_message_chunk' && u.content?.text) {
@@ -103,7 +107,10 @@ async function runTurn(text: string): Promise<boolean> {
         process.stdout.write(u.content.text)
       }
     }
-    if (m.method === 'session/request_permission' && m.id !== undefined) {
+    if (m.method === 'session/request_permission' && m.id !== undefined) asking = asking.then(() => approve(m))
+  }
+  const approve = async (m: Note) => {
+    if (m.id !== undefined) {
       const p = m.params as { toolCall?: { title?: string }; options?: { optionId: string; name?: string; kind?: string }[] }
       const options = p.options ?? []
       // Every option with how long it holds (allow_always is never behind a plain yes); anything else rejects once.
