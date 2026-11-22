@@ -1,12 +1,14 @@
 // ACP agents' side (HCM-207): Grok, agy and Hermes name their effort option differently (Grok and Hermes
 // reasoning_effort, agy thought_level). Grok and agy offer fewer levels than the core (no max), Hermes more (none,
 // minimal, ultra too), but all use the core's names for the ones they have, so the mapping is the option's id and its
-// choices. A level an agent does not list is not sent, and the level in use
-// stays (window.ts; HCM-217 decision 4). session/set_config_option changes the level and reads it back (Grok 1.0.77,
+// choices. A judged max on an agent that lists no max goes as its highest level (Grok's and agy's xhigh; the owner's
+// decision, EFR-12); any other level an agent does not list is not sent, and the level in use stays (window.ts;
+// HCM-217 decision 4). session/set_config_option changes the level and reads it back (Grok 1.0.77,
 // agy 1.5.14, Hermes 0.23.3, there only for that gateway session); Grok starts its next session there too, agy and
 // Hermes do not, so the client keeps to one session.
 // shortcut: Hermes lists max for every model and clamps it per model (gpt-6.1-terra runs xhigh) while reading back max; the applied record cannot see that, check Hermes' ladder if it matters.
-import type { AppliedLevel, Harness } from '../judge-core.ts'
+import { EFFORTS } from '../judge-core.ts'
+import type { AppliedLevel, Effort, Harness } from '../judge-core.ts'
 import type { WindowThread } from './window.ts'
 
 /** The config option that holds the effort, by agent. */
@@ -29,6 +31,16 @@ export function effortFrom(harness: Harness, options: readonly ConfigOption[]): 
 export function sessionFrom(harness: Harness, sessionId: string, options: readonly ConfigOption[]): WindowThread {
   const { model, effort, choices } = effortFrom(harness, options)
   return { harness, id: sessionId, model, effort, by: 'app', base: effort, levels: choices.length ? { [model]: choices } : {}, messages: [] }
+}
+
+/**
+ * The level to ask the agent for: a judged max on a model that lists no max is the highest core level it lists (by
+ * the core's order, not the list's); anything else as judged. The decision record keeps max, the applied one what ran.
+ */
+export function levelFor(t: WindowThread, effort: Effort | undefined): Effort | undefined {
+  const levels = t.levels[t.model]
+  if (effort !== 'max' || !levels || levels.includes('max')) return effort
+  return EFFORTS.filter(e => levels.includes(e)).at(-1) ?? effort
 }
 
 /** The thread after the agent reported its options again: a level or model nobody here set is the person's. */

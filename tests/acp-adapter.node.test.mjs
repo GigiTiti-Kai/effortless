@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { effortFrom, sessionFrom, synced } from '../hooks/adapters/acp.ts'
-import { inputFor, judgeable, turnPlan } from '../hooks/adapters/window.ts'
+import { effortFrom, levelFor, sessionFrom, synced } from '../hooks/adapters/acp.ts'
+import { inputFor, judgeable, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide } from '../hooks/judge-core.ts'
 
 // The option lists as Grok 1.0.77 and agy 1.5.14 sent them on session/new (HCM-207 M2/M3).
@@ -34,11 +34,21 @@ test('Hermes: a judged max is sent; a level outside the core (ultra, none, defau
   for (const level of ['ultra', 'none', 'default']) assert.equal(judgeable(sessionFrom('hermes', 's', hermes(level))), false)
 })
 
-test('a judged max on an agent with no max sends nothing: the level in use stays (HCM-217 decision 4)', async () => {
-  const t = sessionFrom('grok', 's', grok)
-  const d = await decide(inputFor(t, 'prove this conjecture', settings, true), jev('max'))
-  assert.deepEqual([d.by, d.effort], ['jev', 'max'])
-  assert.deepEqual(turnPlan(t, d), { carry: {} })
+test("a judged max on an agent with no max goes as its highest level, xhigh (the owner's decision, EFR-12)", async () => {
+  for (const [harness, options] of [['grok', grok], ['agy', agy]]) {
+    const t = sessionFrom(harness, 's', options)
+    const d = await decide(inputFor(t, 'prove this conjecture', settings, true), jev('max'))
+    assert.deepEqual([d.by, d.effort], ['jev', 'max'])
+    const plan = turnPlan(t, { ...d, effort: levelFor(t, d.effort) })
+    assert.deepEqual(plan, { carry: { effort: 'xhigh' }, by: 'jev' })
+    // Already at xhigh: nothing to send, and the judge chose the level in use.
+    const at = sent(t, plan.carry, plan.by)
+    assert.deepEqual(turnPlan(at, { ...d, effort: levelFor(at, d.effort) }), { carry: {}, by: 'jev' })
+    assert.equal(levelFor(t, 'high'), 'high')
+  }
+  // Ascending lists too, and Hermes, which lists max, gets max.
+  assert.equal(levelFor({ ...sessionFrom('grok', 's', grok), levels: { 'grok-4.7': ['low', 'medium', 'high'] } }, 'max'), 'high')
+  assert.equal(levelFor(sessionFrom('hermes', 's', hermes('high')), 'max'), 'max')
 })
 
 test("the agent's own report of a new level or model is the person's pick; the same report changes nothing", () => {

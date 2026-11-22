@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { parseArgs } from 'node:util'
 
-import { EFFORT_OPTION, sessionFrom, synced } from '../hooks/adapters/acp.ts'
+import { EFFORT_OPTION, levelFor, sessionFrom, synced } from '../hooks/adapters/acp.ts'
 import type { ConfigOption } from '../hooks/adapters/acp.ts'
 import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide } from '../hooks/judge-core.ts'
@@ -196,7 +196,7 @@ while (true) {
       // Set elsewhere while the judge thought (Auto went off): that pick stands, the late verdict is dropped.
       console.log(`[effortless] ${t.effort} set elsewhere while judging: kept`)
     } else {
-      const p = turnPlan(t, d)
+      const p = turnPlan(t, { ...d, effort: levelFor(t, d.effort) })
       carry = p.carry
       by = p.by
       if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
