@@ -14,7 +14,7 @@ import { defaultFor, threadFrom, turnEffort } from '../hooks/adapters/codex.ts'
 import type { ModelList } from '../hooks/adapters/codex.ts'
 import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide } from '../hooks/judge-core.ts'
-import { judgePorts, logPath, nextLine, OPTIONS, record as recordTo, settingsFrom } from './window-judge.ts'
+import { ask, judgePorts, logPath, nextLine, OPTIONS, record as recordTo, settingsFrom } from './window-judge.ts'
 
 const { values: opt } = parseArgs({ options: { ...OPTIONS, resume: { type: 'string' } } })
 const settings = settingsFrom(opt)
@@ -134,10 +134,8 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
   while (true) {
     const next = await Promise.race([done.then(() => 'done' as const), new Promise<'tick'>(r => setTimeout(() => r('tick'), 100))])
     for (const a of approvals.splice(0)) {
-      const shownAt = Date.now()
-      process.stdout.write(`\n[approve ${asked(a, files)}] y/N `)
-      // Only y or yes grants: a message that merely starts with y ("yes, that report...") declines.
-      const yes = /^\s*(y|yes)\s*$/i.test((await nextLine(shownAt)) ?? '')
+      // Only y or yes typed after the question grants: a message that merely starts with y ("yes, that report...") declines.
+      const yes = /^\s*(y|yes)\s*$/i.test((await ask(`\n[approve ${asked(a, files)}] y/N `)) ?? '')
       reply(a.id, a.method === 'item/permissions/requestApproval' ? { permissions: yes ? a.params.permissions : {}, scope: 'turn' } : { decision: yes ? 'accept' : 'decline' })
     }
     if (next === 'done') break

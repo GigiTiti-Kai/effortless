@@ -13,7 +13,7 @@ import { EFFORT_OPTION, sessionFrom, synced } from '../hooks/adapters/acp.ts'
 import type { ConfigOption } from '../hooks/adapters/acp.ts'
 import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide } from '../hooks/judge-core.ts'
-import { judgePorts, logPath, nextLine, OPTIONS, record as recordTo, settingsFrom } from './window-judge.ts'
+import { ask, judgePorts, logPath, nextLine, OPTIONS, record as recordTo, settingsFrom } from './window-judge.ts'
 
 const AGENTS = { grok: ['grok', 'agent', '--no-leader', 'stdio'], agy: ['agy', 'acp'] } as const
 const { values: opt } = parseArgs({ options: { ...OPTIONS, agent: { type: 'string' } } })
@@ -99,26 +99,33 @@ listeners.push(m => {
 async function runTurn(text: string): Promise<boolean> {
   let answer = ''
   let asking = Promise.resolve() // one approval on screen at a time: the next waits for the answer to this one
+  // Each tool call as the agent reported it so far (tool_call, then tool_call_update): an approval may name only its id.
+  const calls = new Map<string, Record<string, unknown>>()
   const on = (m: Note) => {
     if (m.method === 'session/update' && m.params.sessionId === t.id) {
-      const u = m.params.update as { sessionUpdate?: string; content?: { text?: string } }
+      const u = m.params.update as { sessionUpdate?: string; content?: { text?: string }; toolCallId?: string }
       if (u.sessionUpdate === 'agent_message_chunk' && u.content?.text) {
         answer += u.content.text
         process.stdout.write(u.content.text)
       }
+      if ((u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') && u.toolCallId) calls.set(u.toolCallId, { ...calls.get(u.toolCallId), ...u })
     }
     if (m.method === 'session/request_permission' && m.id !== undefined) asking = asking.then(() => approve(m))
   }
   const approve = async (m: Note) => {
     if (m.id !== undefined) {
-      const p = m.params as { toolCall?: { title?: string }; options?: { optionId: string; name?: string; kind?: string }[] }
+      const p = m.params as { toolCall?: Record<string, unknown>; options?: { optionId: string; name?: string; kind?: string }[] }
       const options = p.options ?? []
+      // What the call does, as everything the agent told about it but its bookkeeping: its kind, the files it touches
+      // (locations), its input (rawInput: the path and the text to write) and its content (diffs).
+      const call = { ...calls.get(String(p.toolCall?.toolCallId)), ...p.toolCall }
+      const hidden = new Set(['sessionUpdate', 'toolCallId', 'title', 'status', 'rawOutput'])
+      const shown = Object.fromEntries(Object.entries(call).filter(([k, v]) => !hidden.has(k) && v != null))
       // Every option with how long it holds (allow_always is never behind a plain yes); anything else rejects once.
       const list = options.map((o, i) => `  ${i + 1}) ${o.name ?? o.optionId} [${o.kind ?? 'kind not given'}]`).join('\n')
-      const shownAt = Date.now()
-      process.stdout.write(`\n[approve? ${p.toolCall?.title ?? 'a tool'}]\n${list}\nnumber (anything else: reject this once) `)
+      const question = `\n[approve? ${call.title ?? 'a tool'}]\n${JSON.stringify(shown, null, 2)}\n${list}\nnumber (anything else: reject this once) `
       // Only a line typed after the question answers it: a message typed ahead stays queued as a message.
-      const n = Number(((await nextLine(shownAt)) ?? '').trim())
+      const n = Number(((await ask(question)) ?? '').trim())
       const pick = (Number.isInteger(n) && n > 0 ? options[n - 1] : undefined) ?? options.find(o => o.kind === 'reject_once')
       reply(m.id, { outcome: pick ? { outcome: 'selected', optionId: pick.optionId } : { outcome: 'cancelled' } })
     }
