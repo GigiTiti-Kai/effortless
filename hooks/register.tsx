@@ -1012,6 +1012,22 @@ async function writeApplied($: EngineInterface, effort: Effort | undefined, by: 
     appliedWritten = ''
   })
 }
+// Whether this load may still take the chat's last level from its applied file (see lastApplied): only until its first
+// turn starts or a person sends a message.
+let mayReopen = true
+/**
+ * The level this chat's requests last went out at, when Auto or a named level set it: a chat reopened in a new process
+ * (`claude --resume`, a restart) has no pick, and its first turn may be one nobody typed (the app's "Continue from where
+ * you left off."), which no judge sees. Read from the chat's own applied file: the store's pick is every chat's.
+ */
+async function lastApplied($: EngineInterface): Promise<Pick | null> {
+  const [sid, home] = await Promise.all([$.session.id().catch(() => ''), homeDir($)])
+  if (!home || !/^[\w-]+$/.test(String(sid))) return null
+  const a = JSON.parse(String(await $.fs.read(`${home}/.claude/effortless-applied-${sid}.json`))) as { effort?: unknown; by?: unknown }
+  const by = [...AUTO_BY, 'named'].includes(a.by as AppliedBy) ? (a.by as Pick['by']) : undefined
+  if (!by || !EFFORTS.includes(a.effort as Effort)) return null
+  return { model: await sessionModel($), effort: a.effort as Effort, why: 'the level this chat was on', by }
+}
 // The break since the last main-chat request, if any (see sentNow). A forked skill runs apart and is none (measured).
 let breakSince: false | 'typed' | 'skill' | 'toolsearch' = false
 /** The effort a main-chat request carrying `carried` goes out at (see sentNow). */
@@ -4019,6 +4035,7 @@ Saved to ${out}.md and .json` }
     const card = await read($, handoffCard)
     if (card && (card.kind === 'done' || card.kind === 'copied')) await update($, handoffCard, () => null)
     const byPerson = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
+    if (byPerson) mayReopen = false
     // The handoff check (a Haiku call) runs only for the advised button, for every message the person types, whatever
     // the effort judge is doing (or whether Auto is on).
     if (config.handoffButton === 'advised' && byPerson && !e.text.trim().startsWith('/') && !isFollowUp(e.text)) void checkHandoff($, e.text).catch(() => undefined)
@@ -4237,6 +4254,14 @@ Saved to ${out}.md and .json` }
       }
     }
     if (e.agentId === undefined && e.index === 0) {
+      if (mayReopen) {
+        mayReopen = false
+        const last = (await read($, pick)) || !(await read($, isAuto)) ? null : await lastApplied($).catch(() => null)
+        if (last) {
+          await update($, pick, () => last)
+          void proof($, `reopened chat, first turn nobody typed: ${last.effort} again (by ${last.by}), not the app's ${e.effort ?? 'none'}`)
+        }
+      }
       if (carried.length && !freshTurn) {
         if ((await read($, isAuto)) && cacheSafe(e.model)) await decideCarried($)
         else carried = []

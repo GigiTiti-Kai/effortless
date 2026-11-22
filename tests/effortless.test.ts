@@ -186,6 +186,59 @@ describe('auto', () => {
     expect(applied().length).toBe(2)
   })
 
+  // EFR-11, measured on 2.1.330: a chat reopened in a new process (`claude --resume` after its process died mid-turn)
+  // starts with the app's "Continue from where you left off.", which nobody typed. The new load had no pick, so the
+  // whole turn went out at the app's effort (medium) instead of the level the chat was on.
+  const reopened = (on: On, last: object | null) => {
+    engine(on, { HOME: '/h' })
+    on('session.id', () => ({ value: 'sess-r' }) as never)
+    on('session.start', (_$, e) => ({ cwd: e.cwd }) as never)
+    on('fs.read', (_$, e) => {
+      if (e.path === '/h/.claude/effortless-applied-sess-r.json' && last) return { value: JSON.stringify(last) + '\n' } as never
+      throw new Error('ENOENT')
+    })
+    const written: string[] = []
+    on('fs.write', (_$, e) => {
+      if (e.path === '/h/.claude/effortless-applied-sess-r.json') written.push(e.text)
+      return { value: undefined } as never
+    })
+    return { sent: recordSteps(on), applied: () => written.map(w => JSON.parse(w)) }
+  }
+  const LAST_MAX = { session_id: 'sess-r', effort: 'max', auto: true, by: 'jev', at: 1 }
+
+  test('a chat reopened in a new process: its first turn, nobody typing, goes out at the level the chat was on', async ($, on) => {
+    const { sent, applied } = reopened(on, LAST_MAX)
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await step($, 'medium')
+    await step($, 'medium')
+    expect(sent.map(s => s.effort)).toEqual(['max', 'max'])
+    expect(applied().at(-1)).toMatchObject({ effort: 'max', auto: true, by: 'jev' })
+  })
+
+  test('a chat reopened in a new process: the same when the continue comes through as a prompt nobody typed', async ($, on) => {
+    const { sent } = reopened(on, { ...LAST_MAX, effort: 'high', by: 'named', auto: false })
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await $.prompt.submit({ text: 'Continue from where you left off.', wait: false, origin: { kind: 'auto_continuation' } as never })
+    await step($, 'medium')
+    expect(sent[0].effort).toBe('high')
+  })
+
+  test('a chat reopened in a new process: a typed first prompt is judged as before', async ($, on) => {
+    const { sent } = reopened(on, LAST_MAX)
+    judgeSays(on, '{"model":"opus","effort":"low","why":"tiny"}')
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await $.prompt.submit({ text: 'rename this one variable for me', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
+    expect(sent[0].effort).toBe('low')
+  })
+
+  test('a chat reopened in a new process: a level the app or a skill set is not carried', async ($, on) => {
+    const { sent } = reopened(on, { ...LAST_MAX, effort: 'high', by: 'app', auto: false })
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await step($, 'medium')
+    expect(sent[0].effort).toBe('medium')
+  })
+
   test('routeWorth: a switch to a cold model pays only when it still comes out cheaper', () => {
     const big = 100_000
     // Opus chat, cache warm: a cold Sonnet writes the whole chat and costs more; a warm Sonnet is far cheaper.
