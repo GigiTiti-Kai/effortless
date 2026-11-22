@@ -12,5 +12,5 @@ git ls-files -z --cached --others --exclude-standard | grep -zvE "$OTHER" | whil
 done
 cd "$tmp"
 # The judge core must load in plain Node too (other harnesses' adapters run there); the plugin test below cannot show that.
-node --test tests/judge-core.node.test.mjs
+node --test tests/*.node.test.mjs
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .
