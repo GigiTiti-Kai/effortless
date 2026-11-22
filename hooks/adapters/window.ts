@@ -15,7 +15,8 @@ export type WindowThread = {
   effort: AppliedLevel | null
   /** Who set that level: 'app' when the session opened, 'manual' from /effort or another client. */
   by: AppliedEvent['by']
-  /** The level the thread had when the window client took it over: what turning Auto off puts back. */
+  /** What turning Auto off puts back: Codex's configured level (config/read), else the level the thread had when the
+   * window client took it over (ACP: the session's level when it opened). */
   base: AppliedLevel | null
   /** Each model's levels, as the harness lists them (Codex: model/list; ACP: the effort option's choices). A model
    * not listed is not judged (HCM-217 decision 4). */

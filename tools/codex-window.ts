@@ -3,7 +3,7 @@
 // before Codex sees it. The judged level goes on turn/start only when it differs from the level the thread runs now.
 // Only the turns started here are judged; a plain `codex` run is not touched. Run: node tools/codex-window.ts [--resume <thread id>]
 //   /effort <level>  your pick: Auto goes off until /auto on
-//   /auto on|off     off puts the thread's starting level back on the next turn
+//   /auto on|off     off puts the config's level (model_reasoning_effort) back on the next turn
 //   /quit
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
