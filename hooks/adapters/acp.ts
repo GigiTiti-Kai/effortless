@@ -5,6 +5,7 @@
 // stays (window.ts; HCM-217 decision 4). session/set_config_option changes the level and reads it back (Grok 1.0.77,
 // agy 1.5.14, Hermes 0.23.3, there only for that gateway session); Grok starts its next session there too, agy and
 // Hermes do not, so the client keeps to one session.
+// shortcut: Hermes lists max for every model and clamps it per model (gpt-6.1-terra runs xhigh) while reading back max; the applied record cannot see that, check Hermes' ladder if it matters.
 import type { AppliedLevel, Harness } from '../judge-core.ts'
 import type { WindowThread } from './window.ts'
 
