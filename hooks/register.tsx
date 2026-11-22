@@ -1026,7 +1026,14 @@ async function lastApplied($: EngineInterface): Promise<Pick | null> {
   const a = JSON.parse(String(await $.fs.read(`${home}/.claude/effortless-applied-${sid}.json`))) as { effort?: unknown; by?: unknown }
   const by = [...AUTO_BY, 'named'].includes(a.by as AppliedBy) ? (a.by as Pick['by']) : undefined
   if (!by || !EFFORTS.includes(a.effort as Effort)) return null
-  return { model: await sessionModel($), effort: a.effort as Effort, why: 'the level this chat was on', by }
+  // The first request can come before session.start has loaded Auto and the settings (measured on 2.1.330): read them
+  // from the store, as session.start does.
+  const [storedAuto, kept] = await Promise.all([$.store.get('isAuto').catch(() => null), $.store.get('savedSettings').catch(() => null)])
+  if (storedAuto === false) return null
+  const s = kept && typeof kept === 'object' && Object.keys(kept).length ? readConfig({ ...pluginOptions, ...kept }) : config
+  // A named level runs past Min, Max and save mode, as when it was typed; Auto's own levels stay within them.
+  const effort = by === 'named' ? (a.effort as Effort) : capped(bounded(a.effort as Effort, s.floor, s.ceiling), (await read($, saveUntil)) !== null)
+  return { model: await sessionModel($), effort, why: 'the level this chat was on', by }
 }
 // The break since the last main-chat request, if any (see sentNow). A forked skill runs apart and is none (measured).
 let breakSince: false | 'typed' | 'skill' | 'toolsearch' = false
