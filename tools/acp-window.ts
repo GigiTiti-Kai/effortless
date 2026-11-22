@@ -102,12 +102,13 @@ async function runTurn(text: string) {
       }
     }
     if (m.method === 'session/request_permission' && m.id !== undefined) {
-      const p = m.params as { toolCall?: { title?: string }; options?: { optionId: string; kind?: string }[] }
-      process.stdout.write(`\n[approve? ${p.toolCall?.title ?? 'a tool'}] y/N `)
-      const yes = /^y/i.test((await nextLine()) ?? '')
-      // A plain y or n answers this call only: the *_once option when the agent offers one.
-      const once = p.options?.find(o => o.kind === (yes ? 'allow_once' : 'reject_once'))
-      const pick = once ?? p.options?.find(o => String(o.kind ?? '').startsWith(yes ? 'allow' : 'reject'))
+      const p = m.params as { toolCall?: { title?: string }; options?: { optionId: string; name?: string; kind?: string }[] }
+      const options = p.options ?? []
+      // Every option with how long it holds (allow_always is never behind a plain yes); anything else rejects once.
+      const list = options.map((o, i) => `  ${i + 1}) ${o.name ?? o.optionId} [${o.kind ?? 'kind not given'}]`).join('\n')
+      process.stdout.write(`\n[approve? ${p.toolCall?.title ?? 'a tool'}]\n${list}\nnumber (anything else: reject this once) `)
+      const n = Number(((await nextLine()) ?? '').trim())
+      const pick = (Number.isInteger(n) && n > 0 ? options[n - 1] : undefined) ?? options.find(o => o.kind === 'reject_once')
       reply(m.id, { outcome: pick ? { outcome: 'selected', optionId: pick.optionId } : { outcome: 'cancelled' } })
     }
   }
@@ -129,6 +130,7 @@ while (true) {
   if (cmd?.kind === 'auto') {
     auto = cmd.on
     restoring = !cmd.on
+    picked = undefined // a pick not yet sent is dropped: on judges the next message, off puts the base back
     console.log(`[effortless] Auto ${auto ? 'on' : `off: ${t.base ?? 'the starting level'} goes back before the next message`}`)
     continue
   }
@@ -158,10 +160,15 @@ while (true) {
   } else if (auto && judgeable(t)) {
     const d = await decide(inputFor(t, typed, settings, auto, turn), ports)
     record(d.event)
-    const p = turnPlan(t, d)
-    carry = p.carry
-    by = p.by
-    if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
+    if (!auto) {
+      // Set elsewhere while the judge thought (Auto went off): that pick stands, the late verdict is dropped.
+      console.log(`[effortless] ${t.effort} set elsewhere while judging: kept`)
+    } else {
+      const p = turnPlan(t, d)
+      carry = p.carry
+      by = p.by
+      if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
+    }
   }
   const wanted = carry.effort
   if (wanted) await setEffort(wanted)

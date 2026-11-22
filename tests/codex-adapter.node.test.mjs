@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { lastTurnEffort, levelsFrom, threadFrom } from '../hooks/adapters/codex.ts'
+import { levelsFrom, threadFrom, turnEffort } from '../hooks/adapters/codex.ts'
 import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide, jevRequest } from '../hooks/judge-core.ts'
 
@@ -65,8 +65,6 @@ test('a level the client set that did not run is reverted; a pick of the person 
   assert.equal(appliedEvent(low, 'low', 0).reverted, undefined)
   assert.deepEqual([appliedEvent(low, 'medium', 0).reverted, appliedEvent(low, 'medium', 0).by], [true, 'app'])
   assert.equal(appliedEvent({ ...low, by: 'manual' }, 'medium', 0).reverted, undefined)
-  // Nothing read from the rollout (no turn_context yet) is not a revert.
-  assert.deepEqual([appliedEvent(low, null, 0).reverted, appliedEvent(low, null, 0).by], [undefined, 'jev'])
 })
 
 test('the core is asked about the thread as it runs: no model question, manual after a pick, commands skip the rules', async () => {
@@ -111,15 +109,20 @@ test('commands: /effort, /auto, /quit; anything else is a message', () => {
   assert.equal(command('please /effort high'), undefined)
 })
 
-test("the rollout's last turn_context names the level that ran; a half-written line is skipped", () => {
+test("the turn's own turn_context names the level it ran at; another turn's never does", () => {
   const rollout = [
     JSON.stringify({ type: 'session_meta', payload: {} }),
-    JSON.stringify({ type: 'turn_context', payload: { effort: 'low', model: 'gpt-6.2-sol' } }),
-    JSON.stringify({ type: 'turn_context', payload: { effort: 'ultra', model: 'gpt-6.2-sol' } }),
-    '{"type":"turn_context","payload":{"eff',
+    JSON.stringify({ type: 'turn_context', payload: { turn_id: 't1', effort: 'medium', model: 'gpt-6.2-sol' } }),
+    JSON.stringify({ type: 'turn_context', payload: { turn_id: 't2', effort: 'low', model: 'gpt-6.2-sol' } }),
+    JSON.stringify({ type: 'turn_context', payload: { turn_id: 't2', effort: 'ultra', model: 'gpt-6.2-sol' } }),
+    '{"type":"turn_context","payload":{"turn_id":"t3","eff',
   ].join('\n')
-  assert.equal(lastTurnEffort(rollout), 'ultra')
-  assert.equal(lastTurnEffort(''), null)
+  assert.equal(turnEffort(rollout, 't1'), 'medium')
+  assert.equal(turnEffort(rollout, 't2'), 'ultra')
+  // t3's line is cut short and t4 has none yet: nothing seen, not t2's level.
+  assert.equal(turnEffort(rollout, 't3'), undefined)
+  assert.equal(turnEffort(rollout, 't4'), undefined)
+  assert.equal(turnEffort('', 't1'), undefined)
 })
 
 test('the context is the last user message and the end of the last reply, as Claude Code sends it', () => {

@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { parseArgs } from 'node:util'
 
-import { lastTurnEffort, levelsFrom, threadFrom } from '../hooks/adapters/codex.ts'
+import { levelsFrom, threadFrom, turnEffort } from '../hooks/adapters/codex.ts'
 import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide } from '../hooks/judge-core.ts'
 import { judgePorts, logPath, nextLine, OPTIONS, record as recordTo, settingsFrom } from './window-judge.ts'
@@ -74,20 +74,33 @@ listeners.push(m => {
   console.log(`\n[effortless] ${s.model} at ${s.effort} set elsewhere: Auto off`)
 })
 
-/** Runs one turn to its end, printing the reply; approvals are asked on the terminal. */
-async function runTurn(text: string, carry: { effort?: string }): Promise<void> {
+/** What an approval grants, as the terminal shows it: the command, the files, the permissions, never less. */
+function asked(a: { method: string; params: Record<string, unknown> }, files: Map<string, string[]>): string {
+  const keys = ['command', 'cwd', 'reason', 'networkApprovalContext', 'grantRoot', 'permissions']
+  const shown: Record<string, unknown> = Object.fromEntries(keys.filter(k => a.params[k] != null).map(k => [k, a.params[k]]))
+  const paths = files.get(String(a.params.itemId))
+  if (paths) shown.files = paths
+  const span = a.method === 'item/permissions/requestApproval' ? 'for this turn' : 'once'
+  return `${a.method.split('/')[1]} ${span}: ${JSON.stringify(shown)}`
+}
+
+/** Runs one turn to its end, printing the reply; approvals are asked on the terminal. Returns the turn's id. */
+async function runTurn(text: string, carry: { effort?: string }): Promise<string> {
   let answer = ''
   let streamed = false
   let resolveDone!: () => void
   const done = new Promise<void>(r => (resolveDone = r))
   const approvals: { id: number; method: string; params: Record<string, unknown> }[] = []
+  const files = new Map<string, string[]>()
   const on = (m: { method: string; params: Record<string, unknown>; id?: number }) => {
     if (m.params?.threadId !== undefined && m.params.threadId !== t.id) return
     if (m.method === 'item/agentMessage/delta') {
       streamed = true
       process.stdout.write(String(m.params.delta))
     }
-    if (m.method === 'item/completed' && (m.params.item as { type?: string })?.type === 'agentMessage') answer = String((m.params.item as { text?: string }).text ?? '')
+    const item = m.params?.item as { type?: string; id?: string; text?: string; changes?: { path: string }[] } | undefined
+    if (m.method === 'item/started' && item?.type === 'fileChange' && item.id) files.set(item.id, (item.changes ?? []).map(c => c.path))
+    if (m.method === 'item/completed' && item?.type === 'agentMessage') answer = String(item.text ?? '')
     if (m.id !== undefined && /requestApproval$/.test(m.method)) approvals.push(m as never)
     else if (m.id !== undefined) {
       // Codex asks something this client cannot show (user input, an MCP form, a client tool): say no, so the turn goes on.
@@ -97,11 +110,11 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<void> 
     if (m.method === 'turn/completed') resolveDone()
   }
   listeners.push(on)
-  await call('turn/start', { threadId: t.id, input: [{ type: 'text', text }], ...carry })
+  const started = await call<{ turn: { id: string } }>('turn/start', { threadId: t.id, input: [{ type: 'text', text }], ...carry })
   while (true) {
     const next = await Promise.race([done.then(() => 'done' as const), new Promise<'tick'>(r => setTimeout(() => r('tick'), 100))])
     for (const a of approvals.splice(0)) {
-      process.stdout.write(`\n[approve? ${a.method.split('/')[1]}: ${JSON.stringify(a.params.command ?? a.params.reason ?? '')}] y/N `)
+      process.stdout.write(`\n[approve ${asked(a, files)}] y/N `)
       const yes = /^y/i.test((await nextLine()) ?? '')
       reply(a.id, a.method === 'item/permissions/requestApproval' ? { permissions: yes ? a.params.permissions : {}, scope: 'turn' } : { decision: yes ? 'accept' : 'decline' })
     }
@@ -110,6 +123,7 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<void> 
   listeners.splice(listeners.indexOf(on), 1)
   process.stdout.write(streamed ? '\n' : `${answer}\n`)
   t = remember(t, 'assistant', answer)
+  return started.turn.id
 }
 
 let turns = 0
@@ -123,6 +137,7 @@ while (true) {
   if (cmd?.kind === 'auto') {
     auto = cmd.on
     restoring = !cmd.on
+    picked = undefined // a pick not yet sent is dropped: on judges the next message, off puts the base back
     console.log(`[effortless] Auto ${auto ? 'on' : `off: ${t.base ?? 'the starting level'} goes back on the next turn`}`)
     continue
   }
@@ -152,16 +167,33 @@ while (true) {
   } else if (auto && judgeable(t)) {
     const d = await decide(inputFor(t, typed, settings, auto, turn), ports)
     record(d.event)
-    const p = turnPlan(t, d)
-    carry = p.carry
-    t = sent(t, carry, p.by)
-    if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
+    if (!auto) {
+      // Set elsewhere while the judge thought (Auto went off): that pick stands, the late verdict is dropped.
+      console.log(`[effortless] ${t.effort} set elsewhere while judging: kept`)
+    } else {
+      const p = turnPlan(t, d)
+      carry = p.carry
+      t = sent(t, carry, p.by)
+      if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
+    }
   }
   t = remember(t, 'user', typed)
   if (carry.effort) console.log(`[effortless] ${carry.effort} (${t.by})`)
-  await runTurn(typed, carry)
-  // An ephemeral thread has no rollout: what ran is not seen, so nothing is recorded.
-  if (rollout) record(appliedEvent(t, lastTurnEffort(readFileSync(rollout, 'utf8')), Date.now(), turn))
+  const turnId = await runTurn(typed, carry)
+  // The level this turn ran at, from its own turn_context. None seen (an ephemeral thread, a rollout not written
+  // yet): nothing is recorded.
+  let text = ''
+  try {
+    if (rollout) text = readFileSync(rollout, 'utf8')
+  } catch {
+    // Not written yet.
+  }
+  const seen = turnEffort(text, turnId)
+  if (seen !== undefined) {
+    record(appliedEvent(t, seen, Date.now(), turn))
+    // What ran is the level in use: a level that did not take is sent again when it is picked again.
+    if (seen !== t.effort) t = { ...t, effort: seen, by: 'app' }
+  }
 }
 quitting = true
 server.stdin.end()

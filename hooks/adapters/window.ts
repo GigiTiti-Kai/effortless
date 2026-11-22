@@ -103,11 +103,11 @@ export function chooser(d: Pick<Decision, 'by' | 'effort'>): AppliedEvent['by'] 
 
 /**
  * The record of the level a turn ran at (Codex: turn_context.effort in the rollout; ACP: the option read back).
- * reverted: the client set the level and the turn ran at another one, with nobody changing it. Nothing seen (no
- * turn_context read) is not a revert.
+ * reverted: the client set the level and the turn ran at another one, with nobody changing it. Written only for a
+ * turn whose level was seen.
  */
 export function appliedEvent(t: WindowThread, seen: AppliedLevel | null, now: number, turn?: string): AppliedEvent {
-  const reverted = seen !== null && t.by !== 'manual' && t.by !== 'app' && seen !== t.effort
+  const reverted = t.by !== 'manual' && t.by !== 'app' && seen !== t.effort
   return {
     v: 1,
     harness: t.harness,

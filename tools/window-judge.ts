@@ -69,7 +69,11 @@ function askHaiku(system: string, prompt: string): Promise<{ text: string; token
     // claude gone before it read the prompt (EPIPE): 'close' resolves.
     child.stdin.on('error', () => undefined)
     let out = ''
-    const timer = setTimeout(() => child.kill('SIGTERM'), HAIKU_TIMEOUT_MS)
+    // Past the limit Haiku has no answer, even one it gives later: the window goes on now.
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve(undefined)
+    }, HAIKU_TIMEOUT_MS)
     child.stdout.on('data', b => (out += b))
     child.on('error', () => resolve(undefined))
     child.on('close', code => {
