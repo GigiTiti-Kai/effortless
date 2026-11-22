@@ -114,9 +114,25 @@ export function record(log: string, event: object) {
   appendFileSync(log, JSON.stringify(event) + '\n')
 }
 
-/** The terminal's lines, one at a time: messages, commands and approval answers share it. */
-const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]()
-export const nextLine = async () => {
-  const r = await lines.next()
-  return r.done ? undefined : r.value
+// The terminal's lines, queued with when they came: messages, commands and approval answers share them.
+const queue: { text: string; at: number }[] = []
+let ended = false
+let wakers: (() => void)[] = []
+const wake = () => wakers.splice(0).forEach(w => w())
+createInterface({ input: process.stdin })
+  .on('line', text => (queue.push({ text, at: Date.now() }), wake()))
+  .on('close', () => ((ended = true), wake()))
+
+/**
+ * The next line typed at or after `since` (ms), or undefined when the input ended. Lines typed before it stay queued
+ * for the prompt: an approval asked now is answered only by a line typed after it was shown, never by a message typed
+ * ahead.
+ */
+export async function nextLine(since = 0): Promise<string | undefined> {
+  while (true) {
+    const i = queue.findIndex(l => l.at >= since)
+    if (i >= 0) return queue.splice(i, 1)[0].text
+    if (ended) return undefined
+    await new Promise<void>(r => wakers.push(r))
+  }
 }

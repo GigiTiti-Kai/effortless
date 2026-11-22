@@ -10,7 +10,8 @@ import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { parseArgs } from 'node:util'
 
-import { levelsFrom, threadFrom, turnEffort } from '../hooks/adapters/codex.ts'
+import { defaultFor, threadFrom, turnEffort } from '../hooks/adapters/codex.ts'
+import type { ModelList } from '../hooks/adapters/codex.ts'
 import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide } from '../hooks/judge-core.ts'
 import { judgePorts, logPath, nextLine, OPTIONS, record as recordTo, settingsFrom } from './window-judge.ts'
@@ -52,12 +53,12 @@ const reply = (n: number, result: object) => server.stdin.write(JSON.stringify({
 
 await call('initialize', { clientInfo: { name: 'effortless-codex-window', version: '1' } })
 server.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n')
-const levels = levelsFrom(await call('model/list', {}))
+const list = await call<ModelList>('model/list', {})
 type Opened = { thread: { id: string; path: string | null }; model: string; reasoningEffort: string | null }
 const opened = await call<Opened>(opt.resume ? 'thread/resume' : 'thread/start', opt.resume ? { threadId: opt.resume } : {})
 // The base is the config's level: a resumed thread may hold one this client chose last time.
 const config = await call<{ config: { model_reasoning_effort?: string | null } }>('config/read', {}).catch(() => undefined)
-let t = threadFrom(opened, levels, config?.config.model_reasoning_effort)
+let t = threadFrom(opened, list, config?.config.model_reasoning_effort)
 const rollout = opened.thread.path
 let auto = !opt['no-auto']
 let restoring = false
@@ -68,24 +69,31 @@ console.log(`[effortless] thread ${t.id}, ${t.model} at ${t.effort ?? 'its defau
 listeners.push(m => {
   if (m.method !== 'thread/settings/updated' || m.params.threadId !== t.id) return
   const s = m.params.threadSettings as { model: string; effort: string | null }
-  if (s.effort === t.effort && s.model === t.model) return
-  t = { ...t, model: s.model, effort: s.effort, by: 'manual' }
+  const effort = s.effort ?? defaultFor(list, s.model)
+  if (effort === t.effort && s.model === t.model) return
+  t = { ...t, model: s.model, effort, by: 'manual' }
   auto = false
-  console.log(`\n[effortless] ${s.model} at ${s.effort} set elsewhere: Auto off`)
+  console.log(`\n[effortless] ${s.model} at ${effort} set elsewhere: Auto off`)
 })
 
-/** What an approval grants, as the terminal shows it: the command, the files, the permissions, never less. */
+/**
+ * What an approval grants, as the terminal shows it: everything Codex sent but its ids and clock (the command, extra
+ * permissions, network, the permissions asked), so nothing it grants is left off; and the files a change touches.
+ */
 function asked(a: { method: string; params: Record<string, unknown> }, files: Map<string, string[]>): string {
-  const keys = ['command', 'cwd', 'reason', 'networkApprovalContext', 'grantRoot', 'permissions']
-  const shown: Record<string, unknown> = Object.fromEntries(keys.filter(k => a.params[k] != null).map(k => [k, a.params[k]]))
+  const hidden = new Set(['threadId', 'turnId', 'itemId', 'approvalId', 'startedAtMs'])
+  const shown: Record<string, unknown> = Object.fromEntries(Object.entries(a.params).filter(([k, v]) => !hidden.has(k) && v != null))
   const paths = files.get(String(a.params.itemId))
   if (paths) shown.files = paths
   const span = a.method === 'item/permissions/requestApproval' ? 'for this turn' : 'once'
   return `${a.method.split('/')[1]} ${span}: ${JSON.stringify(shown)}`
 }
 
-/** Runs one turn to its end, printing the reply; approvals are asked on the terminal. Returns the turn's id. */
-async function runTurn(text: string, carry: { effort?: string }): Promise<string> {
+/**
+ * Runs one turn to its end, printing the reply; approvals are asked on the terminal. Returns the turn's id, or nothing
+ * when Codex refused to start it.
+ */
+async function runTurn(text: string, carry: { effort?: string }): Promise<string | undefined> {
   let answer = ''
   let streamed = false
   let resolveDone!: () => void
@@ -107,15 +115,28 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
       process.stdout.write(`\n[effortless] codex asked ${m.method}: not supported in the window client, declined\n`)
       server.stdin.write(JSON.stringify({ id: m.id, error: { code: -32601, message: 'not supported by effortless-codex-window' } }) + '\n')
     }
-    if (m.method === 'turn/completed') resolveDone()
+    if (m.method === 'turn/completed') {
+      // A turn the model refused or that broke off ends too: say so, or the window shows only an empty line.
+      const turn = m.params.turn as { status?: string; error?: { message?: string } | null } | undefined
+      if (turn?.status && turn.status !== 'completed') process.stdout.write(`\n[effortless] the turn ${turn.status}${turn.error?.message ? `: ${turn.error.message}` : ''}\n`)
+      resolveDone()
+    }
   }
   listeners.push(on)
-  const started = await call<{ turn: { id: string } }>('turn/start', { threadId: t.id, input: [{ type: 'text', text }], ...carry })
+  let started: { turn: { id: string } }
+  try {
+    started = await call<{ turn: { id: string } }>('turn/start', { threadId: t.id, input: [{ type: 'text', text }], ...carry })
+  } catch (error) {
+    listeners.splice(listeners.indexOf(on), 1)
+    console.log(`[effortless] codex did not start the turn: ${error instanceof Error ? error.message : error}`)
+    return undefined
+  }
   while (true) {
     const next = await Promise.race([done.then(() => 'done' as const), new Promise<'tick'>(r => setTimeout(() => r('tick'), 100))])
     for (const a of approvals.splice(0)) {
+      const shownAt = Date.now()
       process.stdout.write(`\n[approve ${asked(a, files)}] y/N `)
-      const yes = /^y/i.test((await nextLine()) ?? '')
+      const yes = /^y/i.test((await nextLine(shownAt)) ?? '')
       reply(a.id, a.method === 'item/permissions/requestApproval' ? { permissions: yes ? a.params.permissions : {}, scope: 'turn' } : { decision: yes ? 'accept' : 'decline' })
     }
     if (next === 'done') break
@@ -126,7 +147,6 @@ async function runTurn(text: string, carry: { effort?: string }): Promise<string
   return started.turn.id
 }
 
-let turns = 0
 while (true) {
   process.stdout.write(`${t.effort ?? '-'}${auto ? '·auto' : ''}> `)
   const typed = await nextLine()
@@ -142,7 +162,7 @@ while (true) {
     continue
   }
   if (cmd?.kind === 'effort') {
-    if (!levels[t.model]?.includes(cmd.level)) {
+    if (!t.levels[t.model]?.includes(cmd.level)) {
       console.log(`[effortless] ${t.model} does not list ${cmd.level}: kept ${t.effort}`)
       continue
     }
@@ -153,33 +173,40 @@ while (true) {
     console.log(`[effortless] ${picked} from the next message; Auto off (/auto on hands it back)`)
     continue
   }
-  turns++
-  const turn = String(turns)
+  // Records name the turn by Codex's own id (unique across resumes), known once the turn started.
+  let decided: object | undefined
   let carry: { effort?: string } = {}
+  let by: Parameters<typeof sent>[2]
   if (picked !== undefined) {
     carry = picked !== t.effort ? { effort: picked } : {}
-    t = sent(t, carry, 'manual')
+    by = 'manual'
     picked = undefined
   } else if (restoring) {
     carry = restore(t)
+    by = 'app'
     restoring = false
-    t = sent(t, carry, 'app')
   } else if (auto && judgeable(t)) {
-    const d = await decide(inputFor(t, typed, settings, auto, turn), ports)
-    record(d.event)
+    const d = await decide(inputFor(t, typed, settings, auto), ports)
+    decided = d.event
     if (!auto) {
       // Set elsewhere while the judge thought (Auto went off): that pick stands, the late verdict is dropped.
       console.log(`[effortless] ${t.effort} set elsewhere while judging: kept`)
     } else {
       const p = turnPlan(t, d)
       carry = p.carry
-      t = sent(t, carry, p.by)
+      by = p.by
       if (d.by === 'none') process.stderr.write(`[effortless] no judge answered: kept ${t.effort}\n`)
     }
   }
-  t = remember(t, 'user', typed)
+  const before = t
+  t = remember(sent(t, carry, by), 'user', typed)
   if (carry.effort) console.log(`[effortless] ${carry.effort} (${t.by})`)
   const turnId = await runTurn(typed, carry)
+  if (decided) record(turnId ? { ...decided, turn: turnId } : decided)
+  if (!turnId) {
+    t = before // nothing was sent: the thread is as it was
+    continue
+  }
   // The level this turn ran at, from its own turn_context. None seen (an ephemeral thread, a rollout not written
   // yet): nothing is recorded.
   let text = ''
@@ -190,7 +217,7 @@ while (true) {
   }
   const seen = turnEffort(text, turnId)
   if (seen !== undefined) {
-    record(appliedEvent(t, seen, Date.now(), turn))
+    record(appliedEvent(t, seen, Date.now(), turnId))
     // What ran is the level in use: a level that did not take is sent again when it is picked again.
     if (seen !== t.effort) t = { ...t, effort: seen, by: 'app' }
   }

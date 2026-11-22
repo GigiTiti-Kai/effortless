@@ -4,18 +4,29 @@
 import type { AppliedLevel } from '../judge-core.ts'
 import type { WindowThread } from './window.ts'
 
-/**
- * The thread's state from a thread/start or thread/resume response. base: the level Auto off puts back, the
- * config's model_reasoning_effort (config/read). A resumed thread runs at its last level, which may be one the window
- * client chose, so the base is never taken from the thread; without a configured level it is the thread's own.
- */
-export function threadFrom(res: { thread: { id: string }; model: string; reasoningEffort: string | null }, levels: WindowThread['levels'], base?: string | null): WindowThread {
-  return { harness: 'codex', id: res.thread.id, model: res.model, effort: res.reasoningEffort, by: 'app', base: base ?? res.reasoningEffort, levels, messages: [] }
-}
+/** model/list's answer, as far as the window client reads it. */
+export type ModelList = { data: { id: string; defaultReasoningEffort?: string | null; supportedReasoningEfforts: { reasoningEffort: string }[] }[] }
 
 /** model/list's answer as levels by model. */
-export function levelsFrom(list: { data: { id: string; supportedReasoningEfforts: { reasoningEffort: string }[] }[] }): WindowThread['levels'] {
+export function levelsFrom(list: ModelList): WindowThread['levels'] {
   return Object.fromEntries(list.data.map(m => [m.id, m.supportedReasoningEfforts.map(o => o.reasoningEffort)]))
+}
+
+/** The level a model runs at when nobody named one: no effort in the config (Codex reports null) means this one. */
+export function defaultFor(list: ModelList, model: string): string | null {
+  return list.data.find(m => m.id === model)?.defaultReasoningEffort ?? null
+}
+
+/**
+ * The thread's state from a thread/start or thread/resume response. effort: the response's level, else the model's
+ * default (model/list). base: the level Auto off puts back: the config's model_reasoning_effort (config/read), else the
+ * model's default. A resumed thread runs at its last level, which may be one the window client chose, so the base is
+ * never taken from the thread while a configured or default level is known.
+ */
+export function threadFrom(res: { thread: { id: string }; model: string; reasoningEffort: string | null }, list: ModelList, base?: string | null): WindowThread {
+  const fallback = defaultFor(list, res.model)
+  const effort = res.reasoningEffort ?? fallback
+  return { harness: 'codex', id: res.thread.id, model: res.model, effort, by: 'app', base: base ?? fallback ?? effort, levels: levelsFrom(list), messages: [] }
 }
 
 /**

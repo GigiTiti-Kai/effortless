@@ -84,14 +84,16 @@ listeners.push(m => {
   const u = m.params.update as { sessionUpdate?: string; configOptions?: ConfigOption[] }
   if (u?.sessionUpdate !== 'config_option_update' || !u.configOptions) return
   const next = synced(t, u.configOptions)
-  if (next.by === 'manual' && t.by !== 'manual') {
+  // Any change is the person's, also after an earlier pick of theirs: Auto goes off, so a verdict in flight is dropped.
+  if (next.effort !== t.effort || next.model !== t.model) {
     auto = false
     console.log(`\n[effortless] ${next.model} at ${next.effort} set elsewhere: Auto off`)
   }
   t = next
 })
 
-async function runTurn(text: string) {
+/** Runs one prompt to its end. false: the agent refused it, and nothing ran. */
+async function runTurn(text: string): Promise<boolean> {
   let answer = ''
   const on = async (m: Note) => {
     if (m.method === 'session/update' && m.params.sessionId === t.id) {
@@ -106,17 +108,26 @@ async function runTurn(text: string) {
       const options = p.options ?? []
       // Every option with how long it holds (allow_always is never behind a plain yes); anything else rejects once.
       const list = options.map((o, i) => `  ${i + 1}) ${o.name ?? o.optionId} [${o.kind ?? 'kind not given'}]`).join('\n')
+      const shownAt = Date.now()
       process.stdout.write(`\n[approve? ${p.toolCall?.title ?? 'a tool'}]\n${list}\nnumber (anything else: reject this once) `)
-      const n = Number(((await nextLine()) ?? '').trim())
+      // Only a line typed after the question answers it: a message typed ahead stays queued as a message.
+      const n = Number(((await nextLine(shownAt)) ?? '').trim())
       const pick = (Number.isInteger(n) && n > 0 ? options[n - 1] : undefined) ?? options.find(o => o.kind === 'reject_once')
       reply(m.id, { outcome: pick ? { outcome: 'selected', optionId: pick.optionId } : { outcome: 'cancelled' } })
     }
   }
   listeners.push(on)
-  await call('session/prompt', { sessionId: t.id, prompt: [{ type: 'text', text }] })
-  listeners.splice(listeners.indexOf(on), 1)
+  try {
+    await call('session/prompt', { sessionId: t.id, prompt: [{ type: 'text', text }] })
+  } catch (error) {
+    console.log(`\n[effortless] ${harness} refused the message: ${error instanceof Error ? error.message : error}`)
+    return false
+  } finally {
+    listeners.splice(listeners.indexOf(on), 1)
+  }
   process.stdout.write('\n')
   t = remember(t, 'assistant', answer)
+  return true
 }
 
 let turns = 0
@@ -176,9 +187,10 @@ while (true) {
   const ran = t.effort
   t = remember(sent({ ...t, effort: wanted ?? t.effort }, {}, by), 'user', typed)
   if (wanted) console.log(`[effortless] ${ran} (${t.by})`)
-  record(appliedEvent(t, ran, Date.now(), turn))
+  const applied = appliedEvent(t, ran, Date.now(), turn)
   if (ran !== t.effort) t = { ...t, effort: ran, by: 'app' }
-  await runTurn(typed)
+  // Recorded once the agent took the prompt: a refused one ran at no level.
+  if (await runTurn(typed)) record(applied)
 }
 quitting = true
 agent.stdin.end()

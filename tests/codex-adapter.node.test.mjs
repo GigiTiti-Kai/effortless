@@ -2,17 +2,17 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { levelsFrom, threadFrom, turnEffort } from '../hooks/adapters/codex.ts'
+import { threadFrom, turnEffort } from '../hooks/adapters/codex.ts'
 import { appliedEvent, command, inputFor, judgeable, remember, restore, sent, turnPlan } from '../hooks/adapters/window.ts'
 import { decide, jevRequest } from '../hooks/judge-core.ts'
 
-const levels = levelsFrom({
+const list = {
   data: [
-    { id: 'gpt-6.2-sol', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(reasoningEffort => ({ reasoningEffort })) },
+    { id: 'gpt-6.2-sol', defaultReasoningEffort: 'low', supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(reasoningEffort => ({ reasoningEffort })) },
     { id: 'gpt-6-luna', supportedReasoningEfforts: ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort })) },
   ],
-})
-const opened = threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'medium' }, levels)
+}
+const opened = threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'medium' }, list, 'medium')
 const settings = { judge: 'jev', bias: 0, floor: 'low', ceiling: 'max', saving: false, withModel: true }
 const jev = (choice, extra = {}) => ({
   askJev: async () => ({ ok: true, status: 200, text: JSON.stringify({ answers: { effort: { choice, confidence: 0.9 }, ...extra } }) }),
@@ -48,15 +48,25 @@ test('only a checked model on one of the five levels is judged: ultra and unknow
   assert.deepEqual(ev, { v: 1, harness: 'codex', session: 'th', turn: '3', at: 5, applied: 'ultra', by: 'manual' })
 })
 
+test('no effort in the config: the thread runs at the model default, is judged, and Auto off puts that default back', () => {
+  const fresh = threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: null }, list, null)
+  assert.deepEqual([fresh.effort, fresh.base, judgeable(fresh)], ['low', 'low', true])
+  assert.deepEqual(restore(sent(fresh, { effort: 'high' }, 'jev')), { effort: 'low' })
+  // A model with no default listed is not judged: its level is not known.
+  assert.equal(judgeable(threadFrom({ thread: { id: 'th' }, model: 'gpt-6-luna', reasoningEffort: null }, list, null)), false)
+})
+
 test("resume starts from the level the thread holds; Auto off puts back the config's level, not that one", () => {
-  const resumed = threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'low' }, levels, 'medium')
+  const resumed = threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'low' }, list, 'medium')
   assert.deepEqual([resumed.effort, resumed.base, resumed.by], ['low', 'medium', 'app'])
   assert.deepEqual(restore(resumed), { effort: 'medium' })
   assert.deepEqual(restore(sent(resumed, { effort: 'medium' }, 'app')), {})
-  // No level in the config: the thread's own is the base.
-  assert.equal(threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'high' }, levels, null).base, 'high')
+  // No level in the config: the model's default is the base, not the level a resumed thread came back with.
+  assert.equal(threadFrom({ thread: { id: 'th' }, model: 'gpt-6.2-sol', reasoningEffort: 'high' }, list, null).base, 'low')
+  // No default listed either: the thread's own.
+  assert.equal(threadFrom({ thread: { id: 'th' }, model: 'gpt-6-luna', reasoningEffort: 'high' }, list, null).base, 'high')
   // A base the model does not list is not sent: luna has no xhigh.
-  const luna = threadFrom({ thread: { id: 'th' }, model: 'gpt-6-luna', reasoningEffort: 'low' }, levels, 'xhigh')
+  const luna = threadFrom({ thread: { id: 'th' }, model: 'gpt-6-luna', reasoningEffort: 'low' }, list, 'xhigh')
   assert.deepEqual(restore(luna), {})
 })
 
