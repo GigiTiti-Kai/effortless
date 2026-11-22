@@ -49,8 +49,8 @@ function judgeSays(on: On, text: string) {
 }
 
 /** What sits beneath the plugins in a session: the prompt goes through, the status line takes text. */
-function engine(on: On, env: Record<string, string> = {}, sessionModel = 'claude-opus-5-5', said: { role: string; text: string }[] = []) {
-  mock.store(on)
+function engine(on: On, env: Record<string, string> = {}, sessionModel = 'claude-opus-5-5', said: { role: string; text: string }[] = [], store = true) {
+  if (store) mock.store(on)
   mock.env(on, { EFFORTLESS_MODEL_UI: '1', ...env })
   on('prompt.submit', (_$, e) => ({ text: e.text }))
   on('ui.status', () => ({ value: undefined }))
@@ -184,6 +184,93 @@ describe('auto', () => {
     await step($, 'xhigh')
     expect(sent.at(-1)?.effort).toBe('xhigh')
     expect(applied().length).toBe(2)
+  })
+
+  // EFR-11, measured on 2.1.330: a chat reopened in a new process (`claude --resume` after its process died mid-turn)
+  // starts with the app's "Continue from where you left off.", which nobody typed. The new load had no pick, so the
+  // whole turn went out at the app's effort (medium) instead of the level the chat was on.
+  // `stored`: what the store holds from an earlier process (the new one has not read it yet).
+  const reopened = (on: On, last: object | null, stored: Record<string, unknown> = {}) => {
+    engine(on, { HOME: '/h' }, undefined, undefined, false)
+    const store = new Map(Object.entries(stored))
+    on('store.get', (_$, e) => ({ value: store.get(e.key) ?? null }) as never)
+    on('store.set', (_$, e) => {
+      store.set(e.key, e.value)
+      return { value: undefined } as never
+    })
+    on('session.id', () => ({ value: 'sess-r' }) as never)
+    on('session.start', (_$, e) => ({ cwd: e.cwd }) as never)
+    on('fs.read', (_$, e) => {
+      if (e.path === '/h/.claude/effortless-applied-sess-r.json' && last) return { value: JSON.stringify(last) + '\n' } as never
+      throw new Error('ENOENT')
+    })
+    const written: string[] = []
+    on('fs.write', (_$, e) => {
+      if (e.path === '/h/.claude/effortless-applied-sess-r.json') written.push(e.text)
+      return { value: undefined } as never
+    })
+    return { sent: recordSteps(on), applied: () => written.map(w => JSON.parse(w)) }
+  }
+  const LAST_MAX = { session_id: 'sess-r', effort: 'max', auto: true, by: 'jev', at: 1 }
+
+  test('a chat reopened in a new process: its first turn, nobody typing, goes out at the level the chat was on', async ($, on) => {
+    const { sent, applied } = reopened(on, LAST_MAX)
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await step($, 'medium')
+    await step($, 'medium')
+    expect(sent.map(s => s.effort)).toEqual(['max', 'max'])
+    expect(applied().at(-1)).toMatchObject({ effort: 'max', auto: true, by: 'jev' })
+  })
+
+  test('a chat reopened in a new process: the same when the continue comes through as a prompt nobody typed', async ($, on) => {
+    const { sent } = reopened(on, { ...LAST_MAX, effort: 'high', by: 'named', auto: false })
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await $.prompt.submit({ text: 'Continue from where you left off.', wait: false, origin: { kind: 'auto_continuation' } as never })
+    await step($, 'medium')
+    expect(sent[0].effort).toBe('high')
+  })
+
+  test('a chat reopened in a new process: a typed first prompt is judged as before', async ($, on) => {
+    const { sent } = reopened(on, LAST_MAX)
+    judgeSays(on, '{"model":"opus","effort":"low","why":"tiny"}')
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await $.prompt.submit({ text: 'rename this one variable for me', wait: false, origin: { kind: 'composer' } })
+    await step($, 'medium')
+    expect(sent[0].effort).toBe('low')
+  })
+
+  test('a chat reopened in a new process: Auto stored off is honoured even when the first request comes before session.start', async ($, on) => {
+    const { sent } = reopened(on, LAST_MAX, { isAuto: false })
+    await step($, 'medium')
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    expect(sent[0].effort).toBe('medium')
+  })
+
+  test('a chat reopened in a new process: an Auto level comes back within Max', { options: { effortCeiling: 'medium' } } as never, async ($, on) => {
+    const { sent } = reopened(on, LAST_MAX)
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await step($, 'low')
+    expect(sent[0].effort).toBe('medium')
+  })
+
+  test('a chat reopened in a new process: a Max saved in the settings panel holds before session.start has read it', async ($, on) => {
+    const { sent } = reopened(on, LAST_MAX, { savedSettings: { effortCeiling: 'high' } })
+    await step($, 'low')
+    expect(sent[0].effort).toBe('high')
+  })
+
+  test('a chat reopened in a new process: a named level runs past Max', { options: { effortCeiling: 'medium' } } as never, async ($, on) => {
+    const { sent } = reopened(on, { ...LAST_MAX, by: 'named', auto: false })
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await step($, 'low')
+    expect(sent[0].effort).toBe('max')
+  })
+
+  test('a chat reopened in a new process: a level the app or a skill set is not carried', async ($, on) => {
+    const { sent } = reopened(on, { ...LAST_MAX, effort: 'high', by: 'app', auto: false })
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true } as never)
+    await step($, 'medium')
+    expect(sent[0].effort).toBe('medium')
   })
 
   test('routeWorth: a switch to a cold model pays only when it still comes out cheaper', () => {
